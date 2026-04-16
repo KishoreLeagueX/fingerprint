@@ -3,99 +3,42 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Fingerprint SDK - Init Demo</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f0f2f5; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-    .card { background: #fff; border-radius: 12px; box-shadow: 0 4px 24px rgba(0,0,0,.1); padding: 32px 40px; max-width: 520px; width: 100%; }
-    h1 { font-size: 1.4rem; margin-bottom: 20px; color: #1a1a2e; }
-    .status { padding: 12px 16px; border-radius: 8px; margin-bottom: 14px; font-size: .95rem; word-break: break-all; }
-    .status.pending  { background: #fff3cd; color: #856404; }
-    .status.success  { background: #d4edda; color: #155724; }
-    .status.error    { background: #f8d7da; color: #721c24; }
-    .label { font-weight: 600; display: block; margin-bottom: 4px; }
-    #btn { margin-top: 18px; padding: 10px 24px; border: none; border-radius: 8px; background: #4361ee; color: #fff; font-size: .95rem; cursor: pointer; }
-    #btn:disabled { opacity: .5; cursor: not-allowed; }
-    #btn:hover:not(:disabled) { background: #3a56d4; }
-  </style>
+  <title>Fingerprint SDK — Benchmark</title>
+  <link rel="stylesheet" href="benchmark.css">
 </head>
 <body>
-  <div class="card">
-    <h1>Fingerprint JS — Initialization Check</h1>
+  <div class="container">
+    <h1>Fingerprint SDK — Benchmark</h1>
+    <p class="subtitle">Compare Fingerprint Pro, Open-Source v4, and Custom (fingerprint.js) side-by-side</p>
 
-    <div id="initStatus" class="status pending">
-      <span class="label">SDK Status</span>Initializing…
+    <div class="grid">
+      <div class="card">
+        <h2>Fingerprint Pro</h2>
+        <span class="tag tag-pro">PRO — server-side</span>
+        <div class="row"><span class="rlabel">Status</span><span id="pro-status" class="rval pending">Initializing…</span></div>
+        <div class="row"><span class="rlabel">Visitor ID</span><span id="pro-visitor" class="rval">—</span></div>
+        <div class="row"><span class="rlabel">Event ID</span><span id="pro-event" class="rval">—</span></div>
+      </div>
+
+      <div class="card">
+        <h2>FingerprintJS OSS v4</h2>
+        <span class="tag tag-oss">OPEN SOURCE — client-only</span>
+        <div class="row"><span class="rlabel">Status</span><span id="oss-status" class="rval pending">Initializing…</span></div>
+        <div class="row"><span class="rlabel">Visitor ID</span><span id="oss-visitor" class="rval">—</span></div>
+        <div class="row"><span class="rlabel">Components</span><span id="oss-components" class="rval">—</span></div>
+      </div>
+
+      <div class="card">
+        <h2>Custom (fingerprint.js)</h2>
+        <span class="tag tag-custom">CUSTOM — client-side, self-built</span>
+        <div class="row"><span class="rlabel">Status</span><span id="custom-status" class="rval pending">Initializing…</span></div>
+        <div class="row"><span class="rlabel">Visitor ID</span><span id="custom-visitor" class="rval">—</span></div>
+      </div>
     </div>
 
-    <div id="visitorBox" class="status pending" style="display:none;">
-      <span class="label">Visitor ID</span>—
-    </div>
-
-    <div id="eventBox" class="status pending" style="display:none;">
-      <span class="label">Event ID</span>—
-    </div>
-
-    <button id="btn" disabled>Fetching…</button>
+    <button id="runBtn" disabled>Loading SDKs…</button>
   </div>
 
-  <script>
-    const initStatus = document.getElementById('initStatus');
-    const visitorBox = document.getElementById('visitorBox');
-    const eventBox   = document.getElementById('eventBox');
-    const btn        = document.getElementById('btn');
-
-    // 1. Initialize the agent at application startup.
-    const fpPromise = import('https://fpjscdn.net/v4/mTpKvCdu3TJkeq8LZgkV')
-      .then(Fingerprint => {
-        initStatus.textContent = '';
-        initStatus.innerHTML = '<span class="label">SDK Status</span>SDK loaded & started ✓';
-        initStatus.className = 'status success';
-        return Fingerprint.start({ region: 'ap' });
-      })
-      .catch(err => {
-        initStatus.textContent = '';
-        initStatus.innerHTML = '<span class="label">SDK Status</span>Failed to load SDK: ' + err.message;
-        initStatus.className = 'status error';
-        throw err;
-      });
-
-    // Enable button once the SDK is ready.
-    fpPromise.then(() => {
-      btn.textContent = 'Get Visitor Info';
-      btn.disabled = false;
-    });
-
-    // 2. Get visitor & event identifier on button click.
-    btn.addEventListener('click', () => {
-      btn.disabled = true;
-      btn.textContent = 'Loading…';
-      visitorBox.style.display = 'block';
-      eventBox.style.display   = 'block';
-      visitorBox.className = 'status pending';
-      eventBox.className   = 'status pending';
-      visitorBox.innerHTML = '<span class="label">Visitor ID</span>Fetching…';
-      eventBox.innerHTML   = '<span class="label">Event ID</span>Fetching…';
-
-      fpPromise
-        .then(fp => fp.get())
-        .then(result => {
-          visitorBox.innerHTML = '<span class="label">Visitor ID</span>' + result.visitor_id;
-          visitorBox.className = 'status success';
-          eventBox.innerHTML   = '<span class="label">Event ID</span>' + result.event_id;
-          eventBox.className   = 'status success';
-          btn.textContent = 'Refresh';
-          btn.disabled = false;
-          console.log('visitor_id:', result);
-        })
-        .catch(err => {
-          visitorBox.innerHTML = '<span class="label">Visitor ID</span>Error: ' + err.message;
-          visitorBox.className = 'status error';
-          eventBox.innerHTML   = '<span class="label">Event ID</span>Error';
-          eventBox.className   = 'status error';
-          btn.textContent = 'Retry';
-          btn.disabled = false;
-        });
-    });
-  </script>
+  <script type="module" src="benchmark.js"></script>
 </body>
 </html>
