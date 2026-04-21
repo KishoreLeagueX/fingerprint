@@ -17,27 +17,44 @@ const ossPromise = import('https://openfpcdn.io/fingerprintjs/v4')
   .then(FP => { setStatus('oss', 'Loaded ✓', 'ok'); return FP.load(); })
   .catch(err => { setStatus('oss', 'Failed: ' + err.message, 'err'); throw err; });
 
-// 3. Custom (fingerprint.js) — regular script, exposes window.FingerprintSignals
-const customPromise = new Promise((resolve, reject) => {
-  const s = document.createElement('script');
-  s.src = './components/fingerprint.js';
-  s.onload = () => { setStatus('custom', 'Loaded ✓', 'ok'); resolve(window.FingerprintSignals); };
-  s.onerror = () => { setStatus('custom', 'Failed to load', 'err'); reject(new Error('Failed to load fingerprint.js')); };
-  document.head.appendChild(s);
-});
+// 3. Custom (fingerprint.js) — ES module, same pattern as Pro/OSS
+const customPromise = import('./components/identifier/v0/visitorid.js')
+  .then(FP => { setStatus('custom', 'Loaded ✓', 'ok'); return FP.load(); })
+  .catch(err => { setStatus('custom', 'Failed: ' + err.message, 'err'); throw err; });
 
-// Enable button once any SDK is ready
-Promise.allSettled([proPromise, ossPromise, customPromise]).then(results => {
-  if (results.some(r => r.status === 'fulfilled')) {
-    runBtn.textContent = 'Run Benchmark';
-    runBtn.disabled = false;
-  } else {
-    runBtn.textContent = 'All SDKs failed';
-  }
-});
+// ---------------------------------------------------------------------------
+// PostHog: send fingerprint results on first load
+// ---------------------------------------------------------------------------
+function sendToPostHog(proVal, ossVal, customVal) {
+  if (typeof posthog === 'undefined') return;
 
-// Benchmark runner
-runBtn.addEventListener('click', async () => {
+  // Use custom visitorId as the stable distinct_id; fall back to Pro → OSS
+  const distinctId = customVal?.visitorId || proVal?.visitorId || ossVal?.visitorId;
+  if (distinctId) posthog.identify(distinctId);
+
+  const properties = {
+    user_id: 1,
+    publisher_name: 'https://www.adgeist.ai', 
+    pro_visitor_id: proVal?.visitorId  ?? proVal?.visitor_id  ?? null,
+    oss_visitor_id: ossVal?.visitorId ?? null,
+    adgeist_visitor_id: customVal?.visitorId ?? null,
+
+    adgeist_visitor_details :{
+        visitorId:    customVal.visitorId,
+        isNew:        customVal.isNew,
+        visits:       customVal.visits,
+        signals:      customVal.signals,
+        ...(customVal.similarityScore ? { similarityScore: customVal.similarityScore } : null)
+    }
+  };
+
+  posthog.capture('fingerprinting', properties);
+}
+
+// ---------------------------------------------------------------------------
+// Shared benchmark runner — used by auto-run on load AND by the button
+// ---------------------------------------------------------------------------
+async function runBenchmark() {
   runBtn.disabled = true;
   runBtn.textContent = 'Running…';
 
@@ -49,48 +66,75 @@ runBtn.addEventListener('click', async () => {
   const [proResult, ossResult, customResult] = await Promise.allSettled([
     run(proPromise, fp => fp.get()),
     run(ossPromise, fp => fp.get()),
-    run(customPromise, fp => fp.collectAllSignals()),
+    run(customPromise, agent => agent.get()),
   ]);
 
+  const proVal    = proResult.status    === 'fulfilled' ? proResult.value    : null;
+  const ossVal    = ossResult.status    === 'fulfilled' ? ossResult.value    : null;
+  const customVal = customResult.status === 'fulfilled' ? customResult.value : null;
+
   // Display Pro
-  if (proResult.status === 'fulfilled' && proResult.value) {
-    const r = proResult.value;
-    el('pro-visitor').textContent = r.visitorId || r.visitor_id || '—';
+  if (proVal) {
+    el('pro-visitor').textContent = proVal.visitorId || proVal.visitor_id || '—';
     el('pro-visitor').className = 'rval ok';
-    el('pro-event').textContent = r.requestId || r.event_id || '—';
+    el('pro-event').textContent = proVal.requestId || proVal.event_id || '—';
     el('pro-event').className = 'rval ok';
-    console.log('[Pro]', r);
+    // console.log('[Pro]', proVal);
   } else {
     el('pro-visitor').textContent = 'Error';
     el('pro-visitor').className = 'rval err';
   }
 
   // Display OSS
-  if (ossResult.status === 'fulfilled' && ossResult.value) {
-    const r = ossResult.value;
-    el('oss-visitor').textContent = r.visitorId || '—';
+  if (ossVal) {
+    el('oss-visitor').textContent = ossVal.visitorId || '—';
     el('oss-visitor').className = 'rval ok';
-    const compCount = r.components ? Object.keys(r.components).length : 0;
+    const compCount = ossVal.components ? Object.keys(ossVal.components).length : 0;
     el('oss-components').textContent = compCount + ' signals collected';
     el('oss-components').className = 'rval ok';
-    console.log('[OSS]', r);
+    // console.log('[OSS]', ossVal);
   } else {
     el('oss-visitor').textContent = 'Error';
     el('oss-visitor').className = 'rval err';
   }
 
   // Display Custom
-  if (customResult.status === 'fulfilled' && customResult.value) {
-    const r = customResult.value;
-    el('custom-visitor').textContent = r.visitorId || '—';
+  if (customVal) {
+    el('custom-visitor').textContent = customVal.visitorId || '—';
     el('custom-visitor').className = 'rval ok';
-    console.log('[Custom]', r);
+    const sigCount = customVal.signals ? Object.keys(customVal.signals).length : 0;
+    el('custom-signals').textContent = `${sigCount} signals collected`;
+    el('custom-signals').className = 'rval ok';
+    if (customVal.debug) {
+      const pct = customVal.debug.scorePercent;
+      el('custom-score').textContent = pct !== null
+        ? `${pct}% match (threshold ${customVal.debug.thresholdPercent}%) — ${customVal.debug.matched ? 'MATCHED ✓' : 'NEW visitor'}`
+        : 'First visit — no prior profile';
+      el('custom-score').className = 'rval ok';
+    }
+    // console.log('[Custom] Result:', customVal);
   } else {
     el('custom-visitor').textContent = 'Error';
     el('custom-visitor').className = 'rval err';
   }
 
+  // Send to PostHog
+  sendToPostHog(proVal, ossVal, customVal);
+
   runBtn.textContent = 'Run Again';
   runBtn.disabled = false;
   runBtn.style.display = 'none';
+}
+
+// ---------------------------------------------------------------------------
+// Auto-run on load once SDKs settle; button re-runs manually
+// ---------------------------------------------------------------------------
+Promise.allSettled([proPromise, ossPromise, customPromise]).then(results => {
+  if (results.some(r => r.status === 'fulfilled')) {
+    runBenchmark(); // auto-run → also fires PostHog
+  } else {
+    runBtn.textContent = 'All SDKs failed';
+  }
 });
+
+runBtn.addEventListener('click', runBenchmark);

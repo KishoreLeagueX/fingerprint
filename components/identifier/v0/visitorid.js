@@ -1,6 +1,7 @@
 /**
- * Custom Fingerprint Signal Collector
+ * Unique Identifier v0.0.1 - Copyright (c) thealteroffice, Inc, 2026 (https://www.thealteroffice.com)
  */
+
 
 // ---------------------------------------------------------------------------
 // UTILITIES
@@ -549,13 +550,13 @@ function computeSimilarityScore(currentSignals, storedSignals) {
 
     if (simScore === null) {
       // Signal unavailable on this browser — skip, re-normalize
-      breakdown[key] = { score: null, weight, status: 'unavailable' };
+      breakdown[key] = { score: null, weight, status: 'unavailable', oldValue: storedSignals[key] ?? null, newValue: currentSignals[key] ?? null };
       continue;
     }
 
     weightedSum  += simScore * weight;
     totalWeight  += weight;
-    breakdown[key] = { score: simScore, weight, contribution: simScore * weight };
+    breakdown[key] = { score: simScore, weight, contribution: simScore * weight, oldValue: storedSignals[key] ?? null, newValue: currentSignals[key] ?? null };
   }
 
   const finalScore = totalWeight > 0 ? weightedSum / totalWeight : 0;
@@ -617,9 +618,13 @@ async function mintVisitorId(signals) {
 // MAIN: matchOrCreateVisitor — the full fuzzy pipeline
 // ---------------------------------------------------------------------------
 
-const FP_STORAGE_KEY   = 'fp_visitor_profile_v1';
-const MATCH_THRESHOLD  = 0.75;   // ≥75% weighted similarity → same visitor
+const FP_STORAGE_KEY   = 'visitor_profile_v0_by_adgeist';
+const MATCH_THRESHOLD  = 1;   // ≥75% weighted similarity → same visitor
 const PROFILE_VERSION  = 1;
+
+// Module-level state (avoids window pollution; works in both module and script context)
+let _similarityScore = null;
+let _enableLogs = false;
 
 /**
  * Full fuzzy-matching visitor ID pipeline:
@@ -654,17 +659,21 @@ async function matchOrCreateVisitor(signals) {
     const { score, breakdown } = computeSimilarityScore(signals, stored.signals);
     const pct = (score * 100).toFixed(1);
 
-    console.group(`[FuzzyMatch] Similarity: ${pct}% (threshold ${MATCH_THRESHOLD * 100}%)`);
-    console.log('[FuzzyMatch] Breakdown (score × weight contribution):');
-    const rows = Object.entries(breakdown)
-      .filter(([, v]) => v.score !== null)
-      .sort(([, a], [, b]) => b.weight - a.weight);
-    for (const [key, { score: s, contribution }] of rows) {
-      const bar  = s === 1 ? '✓' : s === 0 ? '✗' : `~${(s*100).toFixed(0)}%`;
-      const loss = s < 1 ? ` (−${((1-s)*breakdown[key].weight*100).toFixed(2)}%)` : '';
-      console.log(`  ${key.padEnd(24)} ${bar}  weight=${( breakdown[key].weight*100).toFixed(1)}%${loss}`);
-    }
-    console.groupEnd();
+    _similarityScore = {
+      score,
+      threshold: MATCH_THRESHOLD,
+      matched: score >= MATCH_THRESHOLD,
+      randomisedSignalBreakdown: Object.entries(breakdown).map(([key, v]) => ({
+          signal:              key,
+          weight:              SIGNAL_WEIGHTS[key] ?? 0,                                          // configured weight (e.g. 0.12)
+          weightPercent:       parseFloat((v.weight * 100).toFixed(2)),                           // weight as % (e.g. 12.0)
+          similarityPercent:   v.score !== null ? parseFloat((v.score * 100).toFixed(1)) : 0,     // similarity % (e.g. 100.0)
+          contributionPercent: v.contribution != null ? parseFloat((v.contribution * 100).toFixed(3)) : 0, // weighted contribution % points
+          status:              v.status ?? 'success',
+          values:              { old: v.oldValue, new: v.newValue },
+        })).sort((a, b) => a.similarityPercent - b.similarityPercent)
+        .filter(v => v.similarityPercent !== 100)
+    };
 
     if (score >= MATCH_THRESHOLD) {
       // Same visitor — update profile signals with latest readings
@@ -673,12 +682,12 @@ async function matchOrCreateVisitor(signals) {
       stored.visits    = (stored.visits || 1) + 1;
       try { localStorage.setItem(FP_STORAGE_KEY, JSON.stringify(stored)); } catch (_) {}
 
-      console.log(`%c[FuzzyMatch] MATCH (${pct}%) → visitorId: ${stored.visitorId}`,
+      if (_enableLogs) console.log(`%c[FuzzyMatch] MATCH (${pct}%) → visitorId: ${stored.visitorId}`,
                   'color:#27ae60;font-weight:bold');
-      return { visitorId: stored.visitorId, score, isNew: false, visits: stored.visits };
+      return { visitorId: stored.visitorId, isNew: false, visits: stored.visits };
     }
 
-    console.warn(`[FuzzyMatch] NO MATCH (${pct}%) — creating new profile`);
+    if (_enableLogs) console.warn(`[FuzzyMatch] NO MATCH (${pct}%) — creating new profile`);
   }
 
   // ---------- New visitor or profile too different → mint fresh ID ----------
@@ -693,9 +702,10 @@ async function matchOrCreateVisitor(signals) {
   };
   try { localStorage.setItem(FP_STORAGE_KEY, JSON.stringify(profile)); } catch (_) {}
 
-  console.log(`%c[FuzzyMatch] NEW visitor → visitorId: ${visitorId}`,
+  if (_enableLogs) console.log(`%c[FuzzyMatch] NEW visitor → visitorId: ${visitorId}`,
               'color:#4361ee;font-weight:bold');
-  return { visitorId, score: stored ? 0 : null, isNew: true, visits: 1 };
+
+  return { visitorId, isNew: true, visits: 1 };
 }
 
 /** Extract only the signals relevant to matching (keeps localStorage lean) */
@@ -707,45 +717,31 @@ function extractProfileSignals(signals) {
   return out;
 }
 
-
-// (MurmurHash3 removed — SHA-256 via crypto.subtle is used exclusively)
-
-/** @deprecated Do not call — throws immediately */
-function murmur3_128() {
-  throw new Error('murmur3_128 removed; use sha256hex() instead');
-}
-
 /** Wrap a signal collector: logs label + value, returns { label, value } */
 function collectSignal(label, fn) {
   try {
     const value = fn();
     if (value && typeof value.then === 'function') {
       return value.then(v => {
-        console.log(`[Signal] ${label}:`, v);
         return { label, value: v };
       }).catch(err => {
-        console.warn(`[Signal] ${label}: ERROR —`, err.message);
+        if (_enableLogs) console.warn(`[Signal] ${label}: ERROR —`, err.message);
         return { label, value: null, error: err.message };
       });
     }
-    console.log(`[Signal] ${label}:`, value);
     return Promise.resolve({ label, value });
   } catch (err) {
-    console.warn(`[Signal] ${label}: ERROR —`, err.message);
+    if (_enableLogs) console.warn(`[Signal] ${label}: ERROR —`, err.message);
     return Promise.resolve({ label, value: null, error: err.message });
   }
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 01 [Early/Critical] — User Agent
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 01 [Early/Critical] — User Agent ----------
 function collectUserAgent() {
   return collectSignal('userAgent', () => navigator.userAgent);
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 02 [Early/Critical] — User-Agent Client Hints (Chromium only)
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 02 [Early/Critical] — User-Agent Client Hints (Chromium only) ----------
 async function collectClientHints() {
   return collectSignal('clientHints', async () => {
     const uaData = navigator.userAgentData;
@@ -763,9 +759,7 @@ async function collectClientHints() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 03 [Early/Critical] — Platform (with proper WebKit/iOS iPad detection, matches fp4)
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 03 [Early/Critical] — Platform (with proper WebKit/iOS iPad detection, matches fp4) ----------
 function collectPlatform() {
   return collectSignal('platform', () => {
     const platform = navigator.platform;
@@ -784,17 +778,12 @@ function collectPlatform() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 04 [Early/Critical] — Navigator Language Singular
-// Source: BA() in fpjs.cdn.adgeist.ai.js — navigator.language (single string)
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 04 [Early/Critical] — Navigator Language Singular ----------
 function collectNavigatorLanguage() {
   return collectSignal('navigatorLanguage', () => navigator.language || null);
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 05 [Early/Critical] — Languages (with Chromium guard matching fp4)
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 05 [Early/Critical] — Languages (with Chromium guard matching fp4) ----------
 function collectLanguages() {
   return collectSignal('languages', () => {
     const nav = navigator;
@@ -818,9 +807,7 @@ function collectLanguages() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 06 [Early/Critical] — Navigator Extra Properties
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 06 [Early/Critical] — Navigator Extra Properties ----------
 function collectNavigatorExtras() {
   return collectSignal('navigatorExtras', () => ({
     cpuClass:        navigator.cpuClass,
@@ -831,25 +818,17 @@ function collectNavigatorExtras() {
   }));
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 07 [Early/Critical] — Navigator App Version
-// Source: xW / sl in fpjs.cdn.adgeist.ai.js
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 07 [Early/Critical] — Navigator App Version ----------
 function collectAppVersion() {
   return collectSignal('appVersion', () => navigator.appVersion || null);
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 08 [Early/Critical] — Navigator Product Sub
-// Source: uW / pl in fpjs.cdn.adgeist.ai.js — should be "20030107" in Chromium
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 08 [Early/Critical] — Navigator Product Sub ----------
 function collectProductSub() {
   return collectSignal('productSub', () => navigator.productSub || null);
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 09 [Early/Critical] — Vendor + Vendor Flavors
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 09 [Early/Critical] — Vendor + Vendor Flavors ----------
 function collectVendorInfo() {
   return collectSignal('vendorInfo', () => {
     const flavors = [];
@@ -868,10 +847,7 @@ function collectVendorInfo() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 10 [Early/Critical] — Navigator Function Names
-// Source: HU() in fpjs.cdn.adgeist.ai.js
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 10 [Early/Critical] — Navigator Function Names ----------
 function collectNavigatorFunctionNames() {
   return collectSignal('navigatorFunctionNames', () => {
     const names = [];
@@ -889,11 +865,7 @@ function collectNavigatorFunctionNames() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 11 [Early/Critical] — Navigator Descriptor Check (tamper detection)
-// Source: UH() / gN() in fpjs.cdn.adgeist.ai.js
-// Checks if navigator properties have proper getter descriptors (not modified)
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 11 [Early/Critical] — Navigator Descriptor Check (tamper detection) ----------
 function collectNavigatorDescriptors() {
   return collectSignal('navigatorDescriptors', () => {
     const props = ['hardwareConcurrency', 'language', 'languages', 'platform',
@@ -918,19 +890,14 @@ function collectNavigatorDescriptors() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 12 [Early/Critical] — UA Client Hints Available (boolean)
-// Source: Dv() in fpjs.cdn.adgeist.ai.js
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 12 [Early/Critical] — UA Client Hints Available (boolean) ----------
 function collectUaDataAvailable() {
   return collectSignal('uaDataAvailable', () =>
     !!(navigator.userAgentData && typeof navigator.userAgentData === 'object')
   );
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 13 [Early/Critical] — Screen Resolution (sorted descending, like OS version)
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 13 [Early/Critical] — Screen Resolution (sorted descending, like OS version) ----------
 function collectScreenInfo() {
   return collectSignal('screenInfo', () => {
     const s = screen;
@@ -947,10 +914,7 @@ function collectScreenInfo() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 14 [Early/Critical] — Screen Frame (taskbar/dock insets, with fullscreen poll)
-// Matches fp4 nn() + en() — polls until fullscreen is exited, rounds to 10px
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 14 [Early/Critical] — Screen Frame (taskbar/dock insets, with fullscreen poll) ----------
 function collectScreenFrame() {
   return collectSignal('screenFrame', async () => {
     function getFrame() {
@@ -986,10 +950,7 @@ function collectScreenFrame() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 15 [Early/Critical] — Window Dimensions (outer + inner)
-// Source: zW in fpjs.cdn.adgeist.ai.js
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 15 [Early/Critical] — Window Dimensions (outer + inner) ----------
 function collectWindowDimensions() {
   return collectSignal('windowDimensions', () => ({
     outerWidth:  window.outerWidth,
@@ -999,10 +960,7 @@ function collectWindowDimensions() {
   }));
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 16 [Early/Critical] — High DPI Media Query (device pixel ratio ≥ 2)
-// Source: bU() in fpjs.cdn.adgeist.ai.js
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 16 [Early/Critical] — High DPI Media Query (device pixel ratio ≥ 2) ----------
 function collectHighDpi() {
   return collectSignal('highDpi', () => {
     if (typeof window.matchMedia !== 'function') return null;
@@ -1013,9 +971,7 @@ function collectHighDpi() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 17 [Early/Critical] — Timezone
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 17 [Early/Critical] — Timezone ----------
 function collectTimezone() {
   return collectSignal('timezone', () => {
     try {
@@ -1031,10 +987,7 @@ function collectTimezone() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 18 [Early/Critical] — Performance Time Origin
-// Source: Zq() / HO() in fpjs.cdn.adgeist.ai.js
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 18 [Early/Critical] — Performance Time Origin ----------
 function collectPerformanceTimeOrigin() {
   return collectSignal('performanceTimeOrigin', () => {
     const t = performance.timeOrigin;
@@ -1042,11 +995,7 @@ function collectPerformanceTimeOrigin() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 19 [Early/Critical] — Timer Precision (performance.now() resolution)
-// Source: xO() in fpjs.cdn.adgeist.ai.js
-// Tests smallest & second-smallest delta between successive performance.now() calls
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 19 [Early/Critical] — Timer Precision (performance.now() resolution) ----------
 function collectTimerPrecision() {
   return collectSignal('timerPrecision', () => {
     const now = performance;
@@ -1069,9 +1018,7 @@ function collectTimerPrecision() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 20 [Early/Critical] — Intl Locale
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 20 [Early/Critical] — Intl Locale ----------
 function collectIntlLocale() {
   return collectSignal('intlLocale', () => {
     if (!window.Intl) return null;
@@ -1081,9 +1028,7 @@ function collectIntlLocale() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 21 [Early/Critical] — Storage Availability
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 21 [Early/Critical] — Storage Availability ----------
 function collectStorageAvailability() {
   return collectSignal('storageAvailability', () => {
     let sessionStorage = false, localStorage = false, openDatabase = false;
@@ -1094,9 +1039,7 @@ function collectStorageAvailability() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 22 [Early/Critical] — Cookie Support
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 22 [Early/Critical] — Cookie Support ----------
 function collectCookieSupport() {
   return collectSignal('cookieSupport', () => {
     try {
@@ -1110,9 +1053,7 @@ function collectCookieSupport() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 23 [Early/Critical] — Hardware Concurrency + Device Memory
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 23 [Early/Critical] — Hardware Concurrency + Device Memory ----------
 function collectHardwareInfo() {
   return collectSignal('hardwareInfo', () => ({
     hardwareConcurrency: navigator.hardwareConcurrency,
@@ -1120,9 +1061,7 @@ function collectHardwareInfo() {
   }));
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 24 [Early/Critical] — Touch Support
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 24 [Early/Critical] — Touch Support ----------
 function collectTouchSupport() {
   return collectSignal('touchSupport', () => {
     const nav = navigator;
@@ -1142,9 +1081,7 @@ function collectTouchSupport() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 25 [Early/Critical] — Connection Info
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 25 [Early/Critical] — Connection Info ----------
 function collectConnectionInfo() {
   return collectSignal('connectionInfo', () => {
     const conn = navigator.connection;
@@ -1159,17 +1096,12 @@ function collectConnectionInfo() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 26 [Early/Critical] — Network Online Status
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 26 [Early/Critical] — Network Online Status ----------
 function collectOnlineStatus() {
   return collectSignal('onlineStatus', () => Boolean(navigator.onLine));
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 27 [Standard] — CSS Media Features (merged, legacy)
-// ---------------------------------------------------------------------------
-// Keep old merged signal for backward-compat hashing; also expose individual signals
+// ---------- SIGNAL 27 [Standard] — CSS Media Features (merged, legacy) ----------
 function collectMediaFeatures() {
   return collectSignal('mediaFeatures', () => {
     const mq = q => { try { return window.matchMedia(q).matches; } catch (_) { return undefined; } };
@@ -1207,10 +1139,7 @@ function collectMediaFeatures() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 28 [Standard] — Prefers Color Scheme
-// Source: xH() in fpjs.cdn.adgeist.ai.js
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 28 [Standard] — Prefers Color Scheme ----------
 function collectPrefersColorScheme() {
   return collectSignal('prefersColorScheme', () => {
     const mq = q => { try { return window.matchMedia(q).matches; } catch (_) { return null; } };
@@ -1220,9 +1149,7 @@ function collectPrefersColorScheme() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 29 [Standard] — Color Gamut (fp4 individual)
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 29 [Standard] — Color Gamut (fp4 individual) ----------
 function collectColorGamut() {
   return collectSignal('colorGamut', () => {
     const mq = q => { try { return window.matchMedia(q).matches; } catch (_) { return false; } };
@@ -1233,9 +1160,7 @@ function collectColorGamut() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 30 [Standard] — Reduced Motion preference (fp4 individual)
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 30 [Standard] — Reduced Motion preference (fp4 individual) ----------
 function collectReducedMotion() {
   return collectSignal('reducedMotion', () => {
     try {
@@ -1246,9 +1171,7 @@ function collectReducedMotion() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 31 [Standard] — Contrast preference (fp4 individual)
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 31 [Standard] — Contrast preference (fp4 individual) ----------
 function collectContrast() {
   return collectSignal('contrast', () => {
     const mq = q => { try { return window.matchMedia(q).matches; } catch (_) { return false; } };
@@ -1260,9 +1183,7 @@ function collectContrast() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 32 [Standard] — HDR display capability (fp4 individual)
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 32 [Standard] — HDR display capability (fp4 individual) ----------
 function collectHdr() {
   return collectSignal('hdr', () => {
     try {
@@ -1273,9 +1194,7 @@ function collectHdr() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 33 [Standard] — Inverted Colors (fp4 individual)
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 33 [Standard] — Inverted Colors (fp4 individual) ----------
 function collectInvertedColors() {
   return collectSignal('invertedColors', () => {
     try {
@@ -1286,9 +1205,7 @@ function collectInvertedColors() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 34 [Standard] — Forced Colors (fp4 individual)
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 34 [Standard] — Forced Colors (fp4 individual) ----------
 function collectForcedColors() {
   return collectSignal('forcedColors', () => {
     try {
@@ -1299,9 +1216,7 @@ function collectForcedColors() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 35 [Standard] — Monochrome depth (fp4 individual)
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 35 [Standard] — Monochrome depth (fp4 individual) ----------
 function collectMonochrome() {
   return collectSignal('monochrome', () => {
     try {
@@ -1314,10 +1229,7 @@ function collectMonochrome() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 36 [Standard] — CSS System Colors (36 system colors)
-// Source: Eq() in fpjs.cdn.adgeist.ai.js
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 36 [Standard] — CSS System Colors (36 system colors) ----------
 function collectSystemColors() {
   return collectSignal('systemColors', () => {
     const div = document.createElement('div');
@@ -1370,11 +1282,7 @@ function collectSystemColors() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 37 [Standard] — CSS Feature Detection (computed style properties)
-// Source: F() in fpjs.cdn.adgeist.ai.js
-// Checks ≥4 CSS properties for support
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 37 [Standard] — CSS Feature Detection (computed style properties) ----------
 function collectCssFeatures() {
   return collectSignal('cssFeatures', () => {
     const div = document.createElement('div');
@@ -1409,10 +1317,7 @@ function collectCssFeatures() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 38 [Standard] — CSS Supports: backdrop-filter
-// Source: nA() in fpjs.cdn.adgeist.ai.js
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 38 [Standard] — CSS Supports: backdrop-filter ----------
 function collectCssBackdropFilter() {
   return collectSignal('cssBackdropFilter', () => {
     if (typeof CSS === 'undefined') return null;
@@ -1420,9 +1325,7 @@ function collectCssBackdropFilter() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 39 [Standard] — Plugins
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 39 [Standard] — Plugins ----------
 function collectPlugins() {
   return collectSignal('plugins', () => {
     const plugins = navigator.plugins;
@@ -1441,10 +1344,7 @@ function collectPlugins() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 40 [Standard] — plugins.length
-// Source: nW in fpjs.cdn.adgeist.ai.js
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 40 [Standard] — plugins.length ----------
 function collectPluginsLength() {
   return collectSignal('pluginsLength', () => {
     if (navigator.plugins === undefined) return null;
@@ -1453,9 +1353,7 @@ function collectPluginsLength() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 41 [Standard] — MimeTypes Count
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 41 [Standard] — MimeTypes Count ----------
 function collectMimeTypesCount() {
   return collectSignal('mimeTypesCount', () => {
     if (navigator.mimeTypes === undefined) return null;
@@ -1464,11 +1362,7 @@ function collectMimeTypesCount() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 42 [Standard] — MimeType Prototype Check
-// Source: kW / Gl in fpjs.cdn.adgeist.ai.js
-// True = native browser mimeTypes; false = spoofed/headless
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 42 [Standard] — MimeType Prototype Check ----------
 function collectMimeTypePrototype() {
   return collectSignal('mimeTypePrototype', () => {
     if (navigator.mimeTypes === undefined) return null;
@@ -1485,10 +1379,7 @@ function collectMimeTypePrototype() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 43 [Standard] — Plugin Prototype Check
-// Source: TA() in fpjs.cdn.adgeist.ai.js
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 43 [Standard] — Plugin Prototype Check ----------
 function collectPluginPrototype() {
   return collectSignal('pluginPrototype', () => {
     if (navigator.plugins === undefined) return null;
@@ -1505,17 +1396,12 @@ function collectPluginPrototype() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 44 [Standard] — PDF Viewer Enabled
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 44 [Standard] — PDF Viewer Enabled ----------
 function collectPdfViewerEnabled() {
   return collectSignal('pdfViewerEnabled', () => navigator.pdfViewerEnabled);
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 45 [Standard] — Apple Pay
-// Returns: -1 not available, -2 insecure context error, -3 in cross-origin iframe, 0/1 result
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 45 [Standard] — Apple Pay ----------
 function collectApplePay() {
   return collectSignal('applePay', () => {
     const APS = window.ApplePaySession;
@@ -1545,9 +1431,7 @@ function collectApplePay() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 46 [Standard] — Private Click Measurement
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 46 [Standard] — Private Click Measurement ----------
 function collectPrivateClickMeasurement() {
   return collectSignal('privateClickMeasurement', () => {
     const a = document.createElement('a');
@@ -1556,9 +1440,7 @@ function collectPrivateClickMeasurement() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 47 [Standard] — Canvas 2D Fingerprint (geometry + text — raw dataURL, matches fp4)
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 47 [Standard] — Canvas 2D Fingerprint (geometry + text — raw dataURL, matches fp4) ----------
 function collectCanvas2D() {
   return collectSignal('canvas2d', () => {
     const canvas = document.createElement('canvas');
@@ -1611,11 +1493,7 @@ function collectCanvas2D() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 48 [Standard] — Canvas PRNG Test (seeded random pixels → pixel data hash)
-// Source: p() in fpjs.cdn.adgeist.ai.js
-// Uses xoshiro128** PRNG seeded from a fixed state to fill a canvas
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 48 [Standard] — Canvas PRNG Test (seeded random pixels → pixel data hash) ----------
 function collectCanvasPrng() {
   return collectSignal('canvasPrng', () => {
     const SIZE = 50;
@@ -1651,10 +1529,7 @@ function collectCanvasPrng() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 49 [Standard] — WebGL Basics (renderer strings, matches fp4 webGlBasics)
-// ---------------------------------------------------------------------------
-
+// ---------- SIGNAL 49 [Standard] — WebGL Basics (renderer strings, matches fp4 webGlBasics) ----------
 function collectWebGL() {
   return collectSignal('webGL', () => {
     const gl = _getWebGLContext();
@@ -1676,11 +1551,7 @@ function collectWebGL() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 50 [Standard] — WebGL Extensions (separate signal, matches fp4 webGlExtensions)
-// ---------------------------------------------------------------------------
-
-
+// ---------- SIGNAL 50 [Standard] — WebGL Extensions (separate signal, matches fp4 webGlExtensions) ----------
 function collectWebGLExtensions() {
   return collectSignal('webGLExtensions', () => {
     const gl = _getWebGLContext();
@@ -1741,10 +1612,7 @@ function collectWebGLExtensions() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 51 [Standard] — WebGL Canvas Hash (renders scene, hashes output)
-// Source: mW() in fpjs.cdn.adgeist.ai.js
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 51 [Standard] — WebGL Canvas Hash (renders scene, hashes output) ----------
 function collectWebGLCanvas() {
   return collectSignal('webGLCanvas', () => {
     const canvas = document.createElement('canvas');
@@ -1780,9 +1648,7 @@ function collectWebGLCanvas() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 52 [Standard] — Audio Fingerprint (OfflineAudioContext, matches fp4 J()/audio)
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 52 [Standard] — Audio Fingerprint (OfflineAudioContext, matches fp4 J()/audio) ----------
 async function collectAudioFingerprint() {
   return collectSignal('audioFingerprint', async () => {
     // iOS 18 Safari + new Chromium-era guard (returns -4, same as fp4)
@@ -1868,9 +1734,7 @@ async function collectAudioFingerprint() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 53 [Standard] — Audio Context Latency
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 53 [Standard] — Audio Context Latency ----------
 function collectAudioLatency() {
   return collectSignal('audioLatency', () => {
     if (!window.AudioContext) return -1;
@@ -1885,10 +1749,7 @@ function collectAudioLatency() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 54 [Standard] — Font Detection (inside isolated iframe — matches fp4 xn.fonts)
-// Running inside an iframe prevents page CSS from affecting baseline measurements.
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 54 [Standard] — Font Detection (inside isolated iframe — matches fp4 xn.fonts) ----------
 async function collectFonts() {
   return collectSignal('fonts', () => _withIframe(async (iframe, win) => {
     const iDoc  = win.document;
@@ -1949,10 +1810,7 @@ async function collectFonts() {
   }, '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body></body></html>'));
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 55 [Standard] — Font Preferences
-// Measures rendered width for 7 font stacks — detects OS-level font rendering differences
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 55 [Standard] — Font Preferences ----------
 async function collectFontPreferences() {
   return collectSignal('fontPreferences', () => _withIframe(async (iframe, win) => {
     const iDoc  = win.document;
@@ -2002,9 +1860,7 @@ async function collectFontPreferences() {
   }, '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body></body></html>'));
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 56 [Standard] — Speech Synthesis Voices
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 56 [Standard] — Speech Synthesis Voices ----------
 async function collectSpeechVoices() {
   return collectSignal('speechVoices', () => new Promise(resolve => {
     const synth = window.speechSynthesis;
@@ -2029,10 +1885,7 @@ async function collectSpeechVoices() {
   }));
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 57 [Standard] — Math Fingerprint
-// Computes 26 math operations that differ across FPU implementations (V8/SpiderMonkey/JSC)
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 57 [Standard] — Math Fingerprint ----------
 function collectMathFingerprint() {
   return collectSignal('mathFingerprint', () => {
     const m = Math;
@@ -2073,10 +1926,7 @@ function collectMathFingerprint() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 58 [Standard] — Float32 NaN Byte (FPU implementation check)
-// Source: hN in fpjs.cdn.adgeist.ai.js
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 58 [Standard] — Float32 NaN Byte (FPU implementation check) ----------
 function collectFloat32NanByte() {
   return collectSignal('float32NanByte', () => {
     const f32 = new Float32Array(1);
@@ -2087,16 +1937,12 @@ function collectFloat32NanByte() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 59 [Standard] — eval.toString() Length
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 59 [Standard] — eval.toString() Length ----------
 function collectEvalLength() {
   return collectSignal('evalLength', () => eval.toString().length);
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 60 [Standard] — Error Stack Hash
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 60 [Standard] — Error Stack Hash ----------
 function collectErrorTrace() {
   return collectSignal('errorTrace', () => {
     try {
@@ -2108,10 +1954,7 @@ function collectErrorTrace() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 61 [Standard] — Error Stack Trace Raw (unhashed)
-// Source: GW in fpjs.cdn.adgeist.ai.js — same error, returns raw stack for format analysis
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 61 [Standard] — Error Stack Trace Raw (unhashed) ----------
 function collectErrorStackFormat() {
   return collectSignal('errorStackFormat', () => {
     try {
@@ -2129,11 +1972,7 @@ function collectErrorStackFormat() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 62 [Standard] — Function.prototype.bind.toString()
-// Source: yW / ul in fpjs.cdn.adgeist.ai.js
-// "function bind() { [native code] }" = real browser; different = modified
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 62 [Standard] — Function.prototype.bind.toString() ----------
 function collectFunctionBindToString() {
   return collectSignal('functionBindToString', () => {
     if (typeof Function.prototype.bind !== 'function') return null;
@@ -2141,10 +1980,7 @@ function collectFunctionBindToString() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 63 [Standard] — Firefox .toSource() Support
-// Source: $W() in fpjs.cdn.adgeist.ai.js
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 63 [Standard] — Firefox .toSource() Support ----------
 function collectFirefoxToSource() {
   return collectSignal('firefoxToSource', () => {
     try {
@@ -2160,11 +1996,7 @@ function collectFirefoxToSource() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 64 [Standard] — Math.random() PRNG Entropy Samples
-// Source: LW() in fpjs.cdn.adgeist.ai.js
-// Collects 6-block sample of Math.random() XOR'd pairs to distinguish V8 vs SpiderMonkey vs JSC
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 64 [Standard] — Math.random() PRNG Entropy Samples ----------
 function collectPrngEntropy() {
   return collectSignal('prngEntropy', () => {
     const samples = [];
@@ -2180,10 +2012,7 @@ function collectPrngEntropy() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 65 [Standard] — window.close.toString() (native function check)
-// Source: P() in fpjs.cdn.adgeist.ai.js
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 65 [Standard] — window.close.toString() (native function check) ----------
 function collectWindowCloseFn() {
   return collectSignal('windowCloseFn', () => {
     if (window.close === undefined) return null;
@@ -2191,10 +2020,7 @@ function collectWindowCloseFn() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 66 [Standard] — WebAssembly Feature Flags
-// Source: gU() in fpjs.cdn.adgeist.ai.js
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 66 [Standard] — WebAssembly Feature Flags ----------
 function collectWasmFeatures() {
   return collectSignal('wasmFeatures', () => {
     const validate = WebAssembly && WebAssembly.validate;
@@ -2223,10 +2049,7 @@ function collectWasmFeatures() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 67 [Standard] — SourceBuffer / Media Source API Types
-// Source: QW() in fpjs.cdn.adgeist.ai.js
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 67 [Standard] — SourceBuffer / Media Source API Types ----------
 function collectSourceBufferTypes() {
   return collectSignal('sourceBufferTypes', () => [
     typeof SourceBuffer,
@@ -2234,10 +2057,7 @@ function collectSourceBufferTypes() {
   ]);
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 68 [Standard] — SharedArrayBuffer Availability
-// Source: AY() in fpjs.cdn.adgeist.ai.js
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 68 [Standard] — SharedArrayBuffer Availability ----------
 function collectSharedArrayBuffer() {
   return collectSignal('sharedArrayBuffer', () => {
     if (typeof window.SharedArrayBuffer !== 'function') return false;
@@ -2246,25 +2066,17 @@ function collectSharedArrayBuffer() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 69 [Standard] — Secure Context
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 69 [Standard] — Secure Context ----------
 function collectSecureContext() {
   return collectSignal('secureContext', () => window.isSecureContext);
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 70 [Standard] — URL Protocol Detection
-// Source: Bq() in fpjs.cdn.adgeist.ai.js
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 70 [Standard] — URL Protocol Detection ----------
 function collectUrlProtocol() {
   return collectSignal('urlProtocol', () => new URL('C:/').protocol);
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 71 [Standard] — window.process (Electron / Node.js detection)
-// Source: IW / El in fpjs.cdn.adgeist.ai.js
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 71 [Standard] — window.process (Electron / Node.js detection) ----------
 function collectWindowProcess() {
   return collectSignal('windowProcess', () => {
     const proc = window.process;
@@ -2277,11 +2089,7 @@ function collectWindowProcess() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 72 [Standard] — window Location Origin
-// Source: c() in fpjs.cdn.adgeist.ai.js
-// Detects iframes via ancestorOrigins
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 72 [Standard] — window Location Origin ----------
 function collectWindowOrigin() {
   return collectSignal('windowOrigin', () => {
     const loc  = window.location;
@@ -2298,10 +2106,7 @@ function collectWindowOrigin() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 73 [Standard] — Document Root Attributes
-// Source: BW / zl in fpjs.cdn.adgeist.ai.js
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 73 [Standard] — Document Root Attributes ----------
 function collectDocumentRootAttributes() {
   return collectSignal('documentRootAttributes', () => {
     const root = document.documentElement;
@@ -2310,11 +2115,7 @@ function collectDocumentRootAttributes() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 74 [Standard] — document.createElement property descriptor
-// Source: $A() in fpjs.cdn.adgeist.ai.js
-// Native browsers don't have 'writeable' in the descriptor (typo check)
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 74 [Standard] — document.createElement property descriptor ----------
 function collectCreateElementDescriptor() {
   return collectSignal('createElementDescriptor', () => {
     const desc = Object.getOwnPropertyDescriptor(document, 'createElement');
@@ -2323,11 +2124,7 @@ function collectCreateElementDescriptor() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 75 [Standard] — Notification Permission
-// Source: aW / tl in fpjs.cdn.adgeist.ai.js
-// Checks whether Notification.permission='denied' but permissions.query='prompt' (inconsistency)
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 75 [Standard] — Notification Permission ----------
 async function collectNotificationPermission() {
   return collectSignal('notificationPermission', async () => {
     if (window.Notification === undefined) return null;
@@ -2346,11 +2143,7 @@ async function collectNotificationPermission() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 76 [Standard] — DRM / Encrypted Media Extension Probe
-// Source: Ve() / y() in fpjs.cdn.adgeist.ai.js
-// Tests EME requestMediaKeySystemAccess for Widevine, PlayReady, FairPlay
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 76 [Standard] — DRM / Encrypted Media Extension Probe ----------
 async function collectDrmCapabilities() {
   return collectSignal('drmCapabilities', async () => {
     if (!navigator.requestMediaKeySystemAccess) return null;
@@ -2386,11 +2179,7 @@ async function collectDrmCapabilities() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 77 [Standard] — MathML Rendering
-// Source: wN() in fpjs.cdn.adgeist.ai.js
-// Renders a MathML expression and measures bounding rect width
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 77 [Standard] — MathML Rendering ----------
 function collectMathMLRendering() {
   return collectSignal('mathMLRendering', () => {
     try {
@@ -2417,11 +2206,7 @@ function collectMathMLRendering() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 78 [Standard] — iOS-specific Radio Input Font Family
-// Source: PO() in fpjs.cdn.adgeist.ai.js
-// On iOS, radio inputs have a distinct font-family that varies by iOS version
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 78 [Standard] — iOS-specific Radio Input Font Family ----------
 function collectIosRadioFont() {
   return collectSignal('iosRadioFont', () => {
     try {
@@ -2437,10 +2222,7 @@ function collectIosRadioFont() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 79 [Standard] — navigator.webdriver
-// Source: V() in fpjs.cdn.adgeist.ai.js
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 79 [Standard] — navigator.webdriver ----------
 function collectWebDriver() {
   return collectSignal('webDriver', () => {
     const wd = navigator.webdriver;
@@ -2450,11 +2232,7 @@ function collectWebDriver() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 80 [Standard] — InputEvent.isTrusted check
-// Source: cv() in fpjs.cdn.adgeist.ai.js
-// In automation environments InputEvent constructor may return isTrusted=true incorrectly
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 80 [Standard] — InputEvent.isTrusted check ----------
 function collectInputEventTrusted() {
   return collectSignal('inputEventTrusted', () => {
     const InputEventCtor = window.InputEvent;
@@ -2468,11 +2246,7 @@ function collectInputEventTrusted() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 81 [Standard] — Automation Framework Detection (window globals)
-// Source: _W / kl,al in fpjs.cdn.adgeist.ai.js
-// Checks for known Selenium/Phantom/WebDriver/Electron/NightmareJS globals
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 81 [Standard] — Automation Framework Detection (window globals) ----------
 function collectAutomationGlobals() {
   return collectSignal('automationGlobals', () => {
     const checks = {
@@ -2502,11 +2276,7 @@ function collectAutomationGlobals() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 82 [Standard] — Automation Window Property Scan
-// Source: tO() in fpjs.cdn.adgeist.ai.js
-// Scans window property names for known bot/automation identifiers
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 82 [Standard] — Automation Window Property Scan ----------
 function collectAutomationWindowScan() {
   return collectSignal('automationWindowScan', () => {
     const knownBotProps = new Set([
@@ -2526,10 +2296,7 @@ function collectAutomationWindowScan() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 83 [Standard] — objectToInspect (Browser DevTools open detection)
-// Source: sO() in fpjs.cdn.adgeist.ai.js
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 83 [Standard] — objectToInspect (Browser DevTools open detection) ----------
 function collectObjectToInspect() {
   return collectSignal('objectToInspect', () => {
     try {
@@ -2542,11 +2309,7 @@ function collectObjectToInspect() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 84 [Standard] — Dom Blockers (full fp4 filter list, tested via iframe injection)
-// Inserts elements into an isolated iframe so page CSS doesn't interfere.
-// A filter-list "fires" when >60% of its selectors are hidden (offsetParent===null).
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 84 [Standard] — Dom Blockers (full fp4 filter list, tested via iframe injection) ----------
 async function collectAdBlocker() {
   return collectSignal('adBlocker', async () => {
     // Only run on iOS/Android WebKit or non-Android (matches fp4 guard)
@@ -2658,9 +2421,7 @@ async function collectAdBlocker() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 85 [Standard] — window.external.toString() (IE/Edge fingerprint)
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 85 [Standard] — window.external.toString() (IE/Edge fingerprint) ----------
 function collectWindowExternal() {
   return collectSignal('windowExternal', () => {
     if (window.external === undefined) return null;
@@ -2669,9 +2430,7 @@ function collectWindowExternal() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 86 [Extended/Pro] — Incognito / Private Browsing detection (StorageManager quota + FileSystem API)
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 86 [Extended/Pro] — Incognito / Private Browsing detection (StorageManager quota + FileSystem API) ----------
 async function collectIncognito() {
   return collectSignal('incognito', async () => {
     // Chrome/Edge private: StorageManager.estimate() quota is capped at ~120 MB
@@ -2698,9 +2457,7 @@ async function collectIncognito() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 87 [Extended/Pro] — Reduced Transparency preference (separate from mediaFeatures)
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 87 [Extended/Pro] — Reduced Transparency preference (separate from mediaFeatures) ----------
 function collectReducedTransparency() {
   return collectSignal('reducedTransparency', () => {
     try {
@@ -2711,9 +2468,7 @@ function collectReducedTransparency() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 88 [Extended/Pro] — Primary input hover capability (hover: hover / none)
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 88 [Extended/Pro] — Primary input hover capability (hover: hover / none) ----------
 function collectHoverNone() {
   return collectSignal('hoverNone', () => {
     try {
@@ -2724,9 +2479,7 @@ function collectHoverNone() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 89 [Extended/Pro] — Any input hover capability (any-hover: hover / none)
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 89 [Extended/Pro] — Any input hover capability (any-hover: hover / none) ----------
 function collectAnyHoverNone() {
   return collectSignal('anyHoverNone', () => {
     try {
@@ -2737,9 +2490,7 @@ function collectAnyHoverNone() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 90 [Extended/Pro] — Primary pointer accuracy (pointer: coarse / fine / none)
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 90 [Extended/Pro] — Primary pointer accuracy (pointer: coarse / fine / none) ----------
 function collectPointerCoarse() {
   return collectSignal('pointerCoarse', () => {
     try {
@@ -2751,9 +2502,7 @@ function collectPointerCoarse() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 91 [Extended/Pro] — Any pointer accuracy (any-pointer: coarse / fine)
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 91 [Extended/Pro] — Any pointer accuracy (any-pointer: coarse / fine) ----------
 function collectAnyPointerCoarse() {
   return collectSignal('anyPointerCoarse', () => {
     try {
@@ -2764,9 +2513,7 @@ function collectAnyPointerCoarse() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 92 [Extended/Pro] — StorageManager quota + usage estimate (persisted flag)
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 92 [Extended/Pro] — StorageManager quota + usage estimate (persisted flag) ----------
 async function collectStorageEstimate() {
   return collectSignal('storageEstimate', async () => {
     try {
@@ -2784,9 +2531,7 @@ async function collectStorageEstimate() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 93 [Extended/Pro] — Battery status (level, charging, chargingTime, dischargingTime)
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 93 [Extended/Pro] — Battery status (level, charging, chargingTime, dischargingTime) ----------
 async function collectBattery() {
   return collectSignal('battery', async () => {
     try {
@@ -2803,9 +2548,7 @@ async function collectBattery() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 94 [Extended/Pro] — Permissions API states (camera, microphone, geolocation, notifications, clipboard-read)
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 94 [Extended/Pro] — Permissions API states (camera, microphone, geolocation, notifications, clipboard-read) ----------
 async function collectPermissions() {
   return collectSignal('permissions', async () => {
     const pm = navigator.permissions;
@@ -2824,9 +2567,7 @@ async function collectPermissions() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 95 [Extended/Pro] — RTCPeerConnection local IP / subnet detection via ICE candidates
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 95 [Extended/Pro] — RTCPeerConnection local IP / subnet detection via ICE candidates ----------
 async function collectRtcPeerConnection() {
   return collectSignal('rtcPeerConnection', async () => {
     const RTC = window.RTCPeerConnection ||
@@ -2866,9 +2607,7 @@ async function collectRtcPeerConnection() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 96 [Extended/Pro] — MediaDevices enumerate — count of audioinput / audiooutput / videoinput devices
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 96 [Extended/Pro] — MediaDevices enumerate — count of audioinput / audiooutput / videoinput devices ----------
 async function collectMediaDevices() {
   return collectSignal('mediaDevices', async () => {
     try {
@@ -2884,9 +2623,7 @@ async function collectMediaDevices() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 97 [Extended/Pro] — Browser scale factor / effective DPR via canvas pixel measurement
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 97 [Extended/Pro] — Browser scale factor / effective DPR via canvas pixel measurement ----------
 function collectBrowserScaleFactor() {
   return collectSignal('browserScaleFactor', () => {
     try {
@@ -2902,9 +2639,7 @@ function collectBrowserScaleFactor() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// SIGNAL 98 [Extended/Pro] — API availability flags — Bluetooth, USB, Serial, XR, MIDI, Gamepad, PaymentRequest …
-// ---------------------------------------------------------------------------
+// ---------- SIGNAL 98 [Extended/Pro] — API availability flags — Bluetooth, USB, Serial, XR, MIDI, Gamepad, PaymentRequest … ----------
 function collectApiAvailability() {
   return collectSignal('apiAvailability', () => {
     const n = window, nav = navigator;
@@ -2932,139 +2667,139 @@ function collectApiAvailability() {
 // MAIN COLLECTOR — Runs all 98 signals, then generates client-side visitorId
 // ===========================================================================
 async function collectAllSignals() {
-  console.group('[FingerprintSignals] Starting signal collection…');
+  if (_enableLogs) console.group('[FingerprintSignals] Starting signal collection…');
   const start = performance.now();
 
   const results = await Promise.all([
     // ── Early/Critical: Navigator / Browser Identity ──────────────────────
-    collectUserAgent(),                // 01 [Early/Critical]
-    collectClientHints(),              // 02 [Early/Critical]
-    collectPlatform(),                 // 03 [Early/Critical]
-    collectNavigatorLanguage(),        // 04 [Early/Critical]
-    collectLanguages(),                // 05 [Early/Critical]
-    collectNavigatorExtras(),          // 06 [Early/Critical]
-    collectAppVersion(),               // 07 [Early/Critical]
-    collectProductSub(),               // 08 [Early/Critical]
-    collectVendorInfo(),               // 09 [Early/Critical]
-    collectNavigatorFunctionNames(),   // 10 [Early/Critical]
-    collectNavigatorDescriptors(),     // 11 [Early/Critical]
-    collectUaDataAvailable(),          // 12 [Early/Critical]
+    collectUserAgent(),
+    collectClientHints(),
+    collectPlatform(),
+    collectNavigatorLanguage(),
+    collectLanguages(),
+    collectNavigatorExtras(),
+    collectAppVersion(),
+    collectProductSub(),
+    collectVendorInfo(),
+    collectNavigatorFunctionNames(),
+    collectNavigatorDescriptors(),
+    collectUaDataAvailable(),
 
     // ── Early/Critical: Screen / Display ──────────────────────────────────
-    collectScreenInfo(),               // 13 [Early/Critical]
-    collectScreenFrame(),              // 14 [Early/Critical]
-    collectWindowDimensions(),         // 15 [Early/Critical]
-    collectHighDpi(),                  // 16 [Early/Critical]
+    collectScreenInfo(),
+    collectScreenFrame(),
+    collectWindowDimensions(),
+    collectHighDpi(),
 
     // ── Early/Critical: Time & Locale ─────────────────────────────────────
-    collectTimezone(),                 // 17 [Early/Critical]
-    collectPerformanceTimeOrigin(),    // 18 [Early/Critical]
-    collectTimerPrecision(),           // 19 [Early/Critical]
-    collectIntlLocale(),               // 20 [Early/Critical]
+    collectTimezone(),
+    collectPerformanceTimeOrigin(),
+    collectTimerPrecision(),
+    collectIntlLocale(),
 
     // ── Early/Critical: Storage & Connectivity ────────────────────────────
-    collectStorageAvailability(),      // 21 [Early/Critical]
-    collectCookieSupport(),            // 22 [Early/Critical]
-    collectHardwareInfo(),             // 23 [Early/Critical]
-    collectTouchSupport(),             // 24 [Early/Critical]
-    collectConnectionInfo(),           // 25 [Early/Critical]
-    collectOnlineStatus(),             // 26 [Early/Critical]
+    collectStorageAvailability(),
+    collectCookieSupport(),
+    collectHardwareInfo(),
+    collectTouchSupport(),
+    collectConnectionInfo(),
+    collectOnlineStatus(),
 
     // ── Standard: CSS Media Features ──────────────────────────────────────
-    collectMediaFeatures(),            // 27 [Standard] legacy merged
-    collectPrefersColorScheme(),       // 28 [Standard]
-    collectColorGamut(),               // 29 [Standard]
-    collectReducedMotion(),            // 30 [Standard]
-    collectContrast(),                 // 31 [Standard]
-    collectHdr(),                      // 32 [Standard]
-    collectInvertedColors(),           // 33 [Standard]
-    collectForcedColors(),             // 34 [Standard]
-    collectMonochrome(),               // 35 [Standard]
+    collectMediaFeatures(),
+    collectPrefersColorScheme(),
+    collectColorGamut(),
+    collectReducedMotion(),
+    collectContrast(),
+    collectHdr(),
+    collectInvertedColors(),
+    collectForcedColors(),
+    collectMonochrome(),
 
     // ── Standard: CSS / Rendering ─────────────────────────────────────────
-    collectSystemColors(),             // 36 [Standard]
-    collectCssFeatures(),              // 37 [Standard]
-    collectCssBackdropFilter(),        // 38 [Standard]
+    collectSystemColors(),
+    collectCssFeatures(),
+    collectCssBackdropFilter(),
 
     // ── Standard: Plugins / MIME ──────────────────────────────────────────
-    collectPlugins(),                  // 39 [Standard]
-    collectPluginsLength(),            // 40 [Standard]
-    collectMimeTypesCount(),           // 41 [Standard]
-    collectMimeTypePrototype(),        // 42 [Standard]
-    collectPluginPrototype(),          // 43 [Standard]
-    collectPdfViewerEnabled(),         // 44 [Standard]
-    collectApplePay(),                 // 45 [Standard]
-    collectPrivateClickMeasurement(),  // 46 [Standard]
+    collectPlugins(),
+    collectPluginsLength(),
+    collectMimeTypesCount(),
+    collectMimeTypePrototype(),
+    collectPluginPrototype(),
+    collectPdfViewerEnabled(),
+    collectApplePay(),
+    collectPrivateClickMeasurement(),
 
     // ── Standard: Canvas / WebGL ──────────────────────────────────────────
-    collectCanvas2D(),                 // 47 [Standard]
-    collectCanvasPrng(),               // 48 [Standard]
-    collectWebGL(),                    // 49 [Standard]
-    collectWebGLExtensions(),          // 50 [Standard]
-    collectWebGLCanvas(),              // 51 [Standard]
+    collectCanvas2D(),
+    collectCanvasPrng(),
+    collectWebGL(),
+    collectWebGLExtensions(),
+    collectWebGLCanvas(),
 
     // ── Standard: Audio ───────────────────────────────────────────────────
-    collectAudioFingerprint(),         // 52 [Standard]
-    collectAudioLatency(),             // 53 [Standard]
+    collectAudioFingerprint(),
+    collectAudioLatency(),
 
     // ── Standard: Fonts ───────────────────────────────────────────────────
-    collectFonts(),                    // 54 [Standard]
-    collectFontPreferences(),          // 55 [Standard]
-    collectSpeechVoices(),             // 56 [Standard]
+    collectFonts(),
+    collectFontPreferences(),
+    collectSpeechVoices(),
 
     // ── Standard: Math / FPU ──────────────────────────────────────────────
-    collectMathFingerprint(),          // 57 [Standard]
-    collectFloat32NanByte(),           // 58 [Standard]
+    collectMathFingerprint(),
+    collectFloat32NanByte(),
 
     // ── Standard: JS Engine ───────────────────────────────────────────────
-    collectEvalLength(),               // 59 [Standard]
-    collectErrorTrace(),               // 60 [Standard]
-    collectErrorStackFormat(),         // 61 [Standard]
-    collectFunctionBindToString(),     // 62 [Standard]
-    collectFirefoxToSource(),          // 63 [Standard]
-    collectPrngEntropy(),              // 64 [Standard]
-    collectWindowCloseFn(),            // 65 [Standard]
+    collectEvalLength(),
+    collectErrorTrace(),
+    collectErrorStackFormat(),
+    collectFunctionBindToString(),
+    collectFirefoxToSource(),
+    collectPrngEntropy(),
+    collectWindowCloseFn(),
 
     // ── Standard: WebAssembly / APIs ──────────────────────────────────────
-    collectWasmFeatures(),             // 66 [Standard]
-    collectSourceBufferTypes(),        // 67 [Standard]
-    collectSharedArrayBuffer(),        // 68 [Standard]
-    collectSecureContext(),            // 69 [Standard]
-    collectUrlProtocol(),              // 70 [Standard]
-    collectWindowProcess(),            // 71 [Standard]
-    collectWindowOrigin(),             // 72 [Standard]
-    collectDocumentRootAttributes(),   // 73 [Standard]
-    collectCreateElementDescriptor(),  // 74 [Standard]
+    collectWasmFeatures(),
+    collectSourceBufferTypes(),
+    collectSharedArrayBuffer(),
+    collectSecureContext(),
+    collectUrlProtocol(),
+    collectWindowProcess(),
+    collectWindowOrigin(),
+    collectDocumentRootAttributes(),
+    collectCreateElementDescriptor(),
 
     // ── Standard: Permissions / DRM / Rendering ───────────────────────────
-    collectNotificationPermission(),   // 75 [Standard]
-    collectDrmCapabilities(),          // 76 [Standard]
-    collectMathMLRendering(),          // 77 [Standard]
-    collectIosRadioFont(),             // 78 [Standard]
+    collectNotificationPermission(),
+    collectDrmCapabilities(),
+    collectMathMLRendering(),
+    collectIosRadioFont(),
 
     // ── Standard: Bot / Automation Detection ──────────────────────────────
-    collectWebDriver(),                // 79 [Standard]
-    collectInputEventTrusted(),        // 80 [Standard]
-    collectAutomationGlobals(),        // 81 [Standard]
-    collectAutomationWindowScan(),     // 82 [Standard]
-    collectObjectToInspect(),          // 83 [Standard]
-    collectAdBlocker(),                // 84 [Standard]
-    collectWindowExternal(),           // 85 [Standard]
+    collectWebDriver(),
+    collectInputEventTrusted(),
+    collectAutomationGlobals(),
+    collectAutomationWindowScan(),
+    collectObjectToInspect(),
+    collectAdBlocker(),
+    collectWindowExternal(),
 
     // ── Extended/Pro ──────────────────────────────────────────────────────
-    collectIncognito(),                // 86 [Extended/Pro]
-    collectReducedTransparency(),      // 87 [Extended/Pro]
-    collectHoverNone(),                // 88 [Extended/Pro]
-    collectAnyHoverNone(),             // 89 [Extended/Pro]
-    collectPointerCoarse(),            // 90 [Extended/Pro]
-    collectAnyPointerCoarse(),         // 91 [Extended/Pro]
-    collectStorageEstimate(),          // 92 [Extended/Pro]
-    collectBattery(),                  // 93 [Extended/Pro]
-    collectPermissions(),              // 94 [Extended/Pro]
-    collectRtcPeerConnection(),        // 95 [Extended/Pro]
-    collectMediaDevices(),             // 96 [Extended/Pro]
-    collectBrowserScaleFactor(),       // 97 [Extended/Pro]
-    collectApiAvailability(),          // 98 [Extended/Pro]
+    collectIncognito(),
+    collectReducedTransparency(),
+    collectHoverNone(),
+    collectAnyHoverNone(),
+    collectPointerCoarse(),
+    collectAnyPointerCoarse(),
+    collectStorageEstimate(),
+    collectBattery(),
+    collectPermissions(),
+    collectRtcPeerConnection(),
+    collectMediaDevices(),
+    collectBrowserScaleFactor(),
+    collectApiAvailability(),
   ]);
 
   const signals = {};
@@ -3073,35 +2808,45 @@ async function collectAllSignals() {
   }
 
   const duration = Math.round(performance.now() - start);
-  console.log(`[FingerprintSignals] ✓ Collected ${results.length} signals in ${duration}ms`);
-  console.log('[FingerprintSignals] Full signal map:', signals);
-  console.groupEnd();
-
-  // Fuzzy-match against stored profile or mint new ID
-  const { visitorId, score, isNew, visits } = await matchOrCreateVisitor(signals);
-
-  // Expose result on window for inspection / integration
-  window.FingerprintSignals.lastResult = { signals, visitorId, score, isNew, visits };
-
-  // Display in page if containers exist (added by index.html)
-  const box = document.getElementById('clientVisitorBox');
-  if (box) {
-    const scoreLabel = score !== null ? ` <span class="score">(${(score*100).toFixed(1)}% match)</span>` : '';
-    const badge      = isNew ? ' <span class="badge-new">NEW</span>' : ` <span class="badge-match">Visit #${visits}</span>`;
-    box.innerHTML = `<span class="label">Client VisitorId (local)</span>${visitorId}${scoreLabel}${badge}`;
-    box.className = 'status success';
-    box.style.display = 'block';
+  if (_enableLogs) {
+    console.log(`[FingerprintSignals] ✓ Collected ${results.length} signals in ${duration}ms`);
+    console.log('[FingerprintSignals] Full signal map:', signals);
+    console.groupEnd();
   }
 
-  return { signals, visitorId, score, isNew };
+  // Fuzzy-match against stored profile or mint new ID
+  const { visitorId, isNew, visits } = await matchOrCreateVisitor(signals);
+
+  if (_enableLogs) console.log(_similarityScore);
+  
+  const result = { signals, visitorId, isNew, visits };
+  if (_similarityScore) result.similarityScore = _similarityScore;
+  return result;
 }
 
-// Auto-run on DOM ready
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', collectAllSignals);
-} else {
-  collectAllSignals();
+/**
+ * Initialize the agent.
+ * Usage:  const identifier = await IdentifierJs.load();
+ *         const result = await identifier.get();
+ */
+async function load() {
+  return { get };
 }
 
-// Also expose globally for manual use
-window.FingerprintSignals = { collectAllSignals };
+/**
+ * Collect all signals, run fuzzy matching, and return the full result.
+ * Equivalent to FingerprintJS OSS agent.get().
+ * @returns {{ visitorId, isNew, visits, signals, similarityScore }}
+ */
+async function get() {
+  const result = await collectAllSignals();
+  return {
+    visitorId:    result.visitorId,
+    isNew:        result.isNew,
+    visits:       result.visits,
+    signals:      result.signals,
+    ...(result.similarityScore ? { similarityScore: result.similarityScore } : null)
+  };
+}
+
+export { load };
