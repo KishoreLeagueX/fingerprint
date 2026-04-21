@@ -14,7 +14,7 @@ async function hashString(str) {
 }
 
 // ---------------------------------------------------------------------------
-// BROWSER DETECTION HELPERS (matching open-source fp4)
+// BROWSER DETECTION HELPERS
 // ---------------------------------------------------------------------------
 function _countTrue(arr) { return arr.reduce((n, v) => n + (v ? 1 : 0), 0); }
 
@@ -104,7 +104,6 @@ function _isAndroid() {
 /**
  * Run a callback inside a hidden same-origin iframe.
  * Cleans up after itself. Returns the callback's return value.
- * Matches withIframe() from open-source fp4.
  */
 async function _withIframe(callback, srcdoc = '') {
   await new Promise(resolve => {
@@ -172,7 +171,7 @@ const _WEBGL_EXT_PARAMS = new Set([
 
 
 // ===========================================================================
-// VISITOR ID — Fuzzy Weighted Similarity (mirrors Fingerprint Pro server logic)
+// VISITOR ID — Fuzzy Weighted Similarity
 // ===========================================================================
 
 /**
@@ -1503,7 +1502,7 @@ function collectCanvasPrng() {
     const ctx = canvas.getContext('2d');
     if (!ctx) return null;
 
-    // xoshiro128** PRNG (same as Pro SDK's oU/ve)
+    // xoshiro128** PRNG
     let a = 0x9e3779b9, b = 0x6c62272e, c = 0x14057b7e, d = 0xf767814f;
     function rand() {
       const t = b << 9;
