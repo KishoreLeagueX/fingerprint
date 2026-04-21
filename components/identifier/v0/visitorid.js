@@ -2840,6 +2840,7 @@ async function load() {
 async function get() {
   const result = await collectAllSignals();
   return {
+    version: "0.26.0421.0208",
     visitorId:    result.visitorId,
     isNew:        result.isNew,
     visits:       result.visits,
