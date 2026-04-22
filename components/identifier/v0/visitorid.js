@@ -618,7 +618,7 @@ async function mintVisitorId(signals) {
 // ---------------------------------------------------------------------------
 
 const FP_STORAGE_KEY   = 'visitor_profile_v0_by_adgeist';
-const MATCH_THRESHOLD  = 1;   // ≥75% weighted similarity → same visitor
+const MATCH_THRESHOLD  = 0.75;   // ≥75% weighted similarity → same visitor
 const PROFILE_VERSION  = 1;
 
 // Module-level state (avoids window pollution; works in both module and script context)
