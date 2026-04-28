@@ -155,7 +155,7 @@ function _getWebGLContext() {
 }
 
 // WebGL parameter / extension-parameter enum sets (used by signal 50)
-// Parameters whose values should be read (from fp4 pn set)
+// Parameters whose values should be read
 const _WEBGL_PARAMS = new Set([
   10752,2849,2884,2885,2886,2928,2929,2930,2931,2932,2960,2961,2962,2963,2964,2965,2966,
   2967,2968,2978,3024,3042,3088,3089,3106,3107,32773,32777,32823,32824,32936,32937,32938,
@@ -164,7 +164,7 @@ const _WEBGL_PARAMS = new Set([
   35660,35661,35724,35738,35739,36003,36004,36005,36347,36348,36349,37440,37441,37443,
   7936,7937,7938,
 ]);
-// Extension parameters (from fp4 bn set)
+// Extension parameters
 const _WEBGL_EXT_PARAMS = new Set([
   34047,35723,36063,34852,34853,34854,34229,36392,36795,38449,
 ]);
@@ -211,7 +211,7 @@ const SIGNAL_WEIGHTS = {
   canvas2d:             0.03,   // raw text + geometry dataURLs
   canvasPrng:           0.02,   // seeded pixel hash
   // ── OS / Locale preferences ─────────────────────────────────────────
-  timezone:             0.03,
+  timezone:             0.05,
   languages:            0.03,
   intlLocale:           0.02,
   platform:             0.03,
@@ -225,15 +225,14 @@ const SIGNAL_WEIGHTS = {
   monochrome:           0.01,
   // ── Navigator / Browser config ──────────────────────────────────────
   vendorInfo:           0.02,   // vendor string + flavors
-  pluginsLength:        0.02,
+  plugins:              0.02,   // installed plugins (Jaccard similarity on names)
   mimeTypesCount:       0.01,
   mediaFeatures:        0.01,   // legacy merged object (kept for compat)
   touchSupport:         0.01,
   navigatorFunctionNames: 0.01,
-  applePay:             0.01,   // 1 = available; -1 = not; -3 = iframe
-  // ── CSS / API flags ─────────────────────────────────────────────────
-  cssBackdropFilter:    0.01,
-  // ── Extended/Pro signals ────────────────────────────────────────────
+  // ── CSS ─────────────────────────────────────────────────
+  cssFeatures:          0.01,   // CSS property support detection
+  // ── UnCategorized ────────────────────────────────────────────
   incognito:            0.04,   // private browsing detection
   reducedTransparency:  0.01,
   hoverNone:            0.01,   // touch vs mouse primary input
@@ -241,7 +240,6 @@ const SIGNAL_WEIGHTS = {
   pointerCoarse:        0.01,   // input pointer type
   anyPointerCoarse:     0.01,
   storageEstimate:      0.02,   // quota size fingerprint
-  battery:              0.02,   // battery hardware
   permissions:          0.02,   // camera/mic/geo permission states
   rtcPeerConnection:    0.03,   // local subnet IP (very stable)
   mediaDevices:         0.02,   // device count
@@ -295,8 +293,15 @@ function computeSignalSimilarity(key, current, stored) {
     case 'evalLength':
     case 'float32NanByte':
     case 'mimeTypesCount':
-    case 'pluginsLength':
       return current === stored ? 1.0 : 0;
+
+    // ── Plugins: Jaccard similarity over plugin names ──────────────────
+    case 'plugins': {
+      if (!Array.isArray(current) || !Array.isArray(stored)) return 0;
+      const namesC = current.map(p => p && p.name).filter(Boolean);
+      const namesS = stored.map(p => p && p.name).filter(Boolean);
+      return jaccardSimilarity(namesC, namesS);
+    }
 
     // ── String/enum exact match ────────────────────────────────────────
     case 'errorStackFormat':
@@ -305,7 +310,6 @@ function computeSignalSimilarity(key, current, stored) {
     case 'platform':
     case 'webGLCanvas':
     case 'canvasPrng':
-    case 'cssBackdropFilter':
     case 'navigatorFunctionNames':
     case 'colorGamut':
     case 'contrast':
@@ -314,7 +318,6 @@ function computeSignalSimilarity(key, current, stored) {
     case 'invertedColors':
     case 'forcedColors':
     case 'monochrome':
-    case 'applePay':
     case 'screenFrame':
     case 'privateClickMeasurement':
       return current === stored ? 1.0 : 0;
@@ -466,7 +469,8 @@ function computeSignalSimilarity(key, current, stored) {
     }
 
     // ── Media features: prefer-color-scheme, colorGamut, etc. ─────────
-    case 'mediaFeatures': {
+    case 'mediaFeatures':
+    case 'cssFeatures': {
       if (typeof current !== 'object' || typeof stored !== 'object') return 0;
       return objectKeySimilarity(current, stored);
     }
@@ -486,14 +490,6 @@ function computeSignalSimilarity(key, current, stored) {
       if (typeof current !== 'object' || typeof stored !== 'object') return 0;
       // quota changes in private vs normal — exact match
       return current.quota === stored.quota && current.persisted === stored.persisted ? 1.0 : 0.5;
-    }
-
-    case 'battery': {
-      if (typeof current !== 'object' || typeof stored !== 'object') return 0;
-      // chargingTime/dischargingTime fluctuate; only level+charging matter
-      const lev  = current.level   === stored.level   ? 1 : 0;
-      const chg  = current.charging === stored.charging ? 1 : 0;
-      return (lev + chg) / 2;
     }
 
     case 'permissions': {
@@ -735,12 +731,12 @@ function collectSignal(label, fn) {
   }
 }
 
-// ---------- SIGNAL 01 [Early/Critical] — User Agent ----------
+// ---------- SIGNAL 01 — User Agent ----------
 function collectUserAgent() {
   return collectSignal('userAgent', () => navigator.userAgent);
 }
 
-// ---------- SIGNAL 02 [Early/Critical] — User-Agent Client Hints (Chromium only) ----------
+// ---------- SIGNAL 02 — User-Agent Client Hints (Chromium only) ----------
 async function collectClientHints() {
   return collectSignal('clientHints', async () => {
     const uaData = navigator.userAgentData;
@@ -758,7 +754,7 @@ async function collectClientHints() {
   });
 }
 
-// ---------- SIGNAL 03 [Early/Critical] — Platform (with proper WebKit/iOS iPad detection, matches fp4) ----------
+// ---------- SIGNAL 03 — Platform (with proper WebKit/iOS iPad detection) ----------
 function collectPlatform() {
   return collectSignal('platform', () => {
     const platform = navigator.platform;
@@ -777,12 +773,12 @@ function collectPlatform() {
   });
 }
 
-// ---------- SIGNAL 04 [Early/Critical] — Navigator Language Singular ----------
+// ---------- SIGNAL 04 — Navigator Language Singular ----------
 function collectNavigatorLanguage() {
   return collectSignal('navigatorLanguage', () => navigator.language || null);
 }
 
-// ---------- SIGNAL 05 [Early/Critical] — Languages (with Chromium guard matching fp4) ----------
+// ---------- SIGNAL 05 — Languages (with Chromium guard) ----------
 function collectLanguages() {
   return collectSignal('languages', () => {
     const nav = navigator;
@@ -806,7 +802,7 @@ function collectLanguages() {
   });
 }
 
-// ---------- SIGNAL 06 [Early/Critical] — Navigator Extra Properties ----------
+// ---------- SIGNAL 06 — Navigator Extra Properties ----------
 function collectNavigatorExtras() {
   return collectSignal('navigatorExtras', () => ({
     cpuClass:        navigator.cpuClass,
@@ -817,17 +813,7 @@ function collectNavigatorExtras() {
   }));
 }
 
-// ---------- SIGNAL 07 [Early/Critical] — Navigator App Version ----------
-function collectAppVersion() {
-  return collectSignal('appVersion', () => navigator.appVersion || null);
-}
-
-// ---------- SIGNAL 08 [Early/Critical] — Navigator Product Sub ----------
-function collectProductSub() {
-  return collectSignal('productSub', () => navigator.productSub || null);
-}
-
-// ---------- SIGNAL 09 [Early/Critical] — Vendor + Vendor Flavors ----------
+// ---------- SIGNAL 07 — Vendor + Vendor Flavors ----------
 function collectVendorInfo() {
   return collectSignal('vendorInfo', () => {
     const flavors = [];
@@ -846,7 +832,7 @@ function collectVendorInfo() {
   });
 }
 
-// ---------- SIGNAL 10 [Early/Critical] — Navigator Function Names ----------
+// ---------- SIGNAL 08 — Navigator Function Names ----------
 function collectNavigatorFunctionNames() {
   return collectSignal('navigatorFunctionNames', () => {
     const names = [];
@@ -864,7 +850,7 @@ function collectNavigatorFunctionNames() {
   });
 }
 
-// ---------- SIGNAL 11 [Early/Critical] — Navigator Descriptor Check (tamper detection) ----------
+// ---------- SIGNAL 09 — Navigator Descriptor Check (tamper detection) ----------
 function collectNavigatorDescriptors() {
   return collectSignal('navigatorDescriptors', () => {
     const props = ['hardwareConcurrency', 'language', 'languages', 'platform',
@@ -889,20 +875,13 @@ function collectNavigatorDescriptors() {
   });
 }
 
-// ---------- SIGNAL 12 [Early/Critical] — UA Client Hints Available (boolean) ----------
-function collectUaDataAvailable() {
-  return collectSignal('uaDataAvailable', () =>
-    !!(navigator.userAgentData && typeof navigator.userAgentData === 'object')
-  );
-}
-
-// ---------- SIGNAL 13 [Early/Critical] — Screen Resolution (sorted descending, like OS version) ----------
+// ---------- SIGNAL 10 — Screen Resolution (sorted descending, like OS version) ----------
 function collectScreenInfo() {
   return collectSignal('screenInfo', () => {
     const s = screen;
     const width  = parseInt(s.width)  || null;
     const height = parseInt(s.height) || null;
-    // Return [larger, smaller] — landscape/portrait agnostic (matches fp4 K())
+    // Return [larger, smaller] — landscape/portrait agnostic
     const dims = [width, height];
     dims.sort((a, b) => b - a);
     return {
@@ -913,7 +892,7 @@ function collectScreenInfo() {
   });
 }
 
-// ---------- SIGNAL 14 [Early/Critical] — Screen Frame (taskbar/dock insets, with fullscreen poll) ----------
+// ---------- SIGNAL 11 — Screen Frame (taskbar/dock insets, with fullscreen poll) ----------
 function collectScreenFrame() {
   return collectSignal('screenFrame', async () => {
     function getFrame() {
@@ -931,7 +910,7 @@ function collectScreenFrame() {
 
     let frame = getFrame();
 
-    // If fullscreen is active, exit it first (same as fp4)
+    // If fullscreen is active, exit it first
     if (isAllZero(frame)) {
       const doc = document;
       const fsElement = doc.fullscreenElement || doc.msFullscreenElement ||
@@ -949,7 +928,7 @@ function collectScreenFrame() {
   });
 }
 
-// ---------- SIGNAL 15 [Early/Critical] — Window Dimensions (outer + inner) ----------
+// ---------- SIGNAL 12 — Window Dimensions (outer + inner) ----------
 function collectWindowDimensions() {
   return collectSignal('windowDimensions', () => ({
     outerWidth:  window.outerWidth,
@@ -959,7 +938,7 @@ function collectWindowDimensions() {
   }));
 }
 
-// ---------- SIGNAL 16 [Early/Critical] — High DPI Media Query (device pixel ratio ≥ 2) ----------
+// ---------- SIGNAL 13 — High DPI Media Query (device pixel ratio ≥ 2) ----------
 function collectHighDpi() {
   return collectSignal('highDpi', () => {
     if (typeof window.matchMedia !== 'function') return null;
@@ -970,7 +949,7 @@ function collectHighDpi() {
   });
 }
 
-// ---------- SIGNAL 17 [Early/Critical] — Timezone ----------
+// ---------- SIGNAL 14 — Timezone ----------
 function collectTimezone() {
   return collectSignal('timezone', () => {
     try {
@@ -986,7 +965,7 @@ function collectTimezone() {
   });
 }
 
-// ---------- SIGNAL 18 [Early/Critical] — Performance Time Origin ----------
+// ---------- SIGNAL 15 — Performance Time Origin ----------
 function collectPerformanceTimeOrigin() {
   return collectSignal('performanceTimeOrigin', () => {
     const t = performance.timeOrigin;
@@ -994,7 +973,7 @@ function collectPerformanceTimeOrigin() {
   });
 }
 
-// ---------- SIGNAL 19 [Early/Critical] — Timer Precision (performance.now() resolution) ----------
+// ---------- SIGNAL 16 — Timer Precision (performance.now() resolution) ----------
 function collectTimerPrecision() {
   return collectSignal('timerPrecision', () => {
     const now = performance;
@@ -1017,7 +996,7 @@ function collectTimerPrecision() {
   });
 }
 
-// ---------- SIGNAL 20 [Early/Critical] — Intl Locale ----------
+// ---------- SIGNAL 17 — Intl Locale ----------
 function collectIntlLocale() {
   return collectSignal('intlLocale', () => {
     if (!window.Intl) return null;
@@ -1027,7 +1006,7 @@ function collectIntlLocale() {
   });
 }
 
-// ---------- SIGNAL 21 [Early/Critical] — Storage Availability ----------
+// ---------- SIGNAL 18 — Storage Availability ----------
 function collectStorageAvailability() {
   return collectSignal('storageAvailability', () => {
     let sessionStorage = false, localStorage = false, openDatabase = false;
@@ -1038,7 +1017,7 @@ function collectStorageAvailability() {
   });
 }
 
-// ---------- SIGNAL 22 [Early/Critical] — Cookie Support ----------
+// ---------- SIGNAL 19 — Cookie Support ----------
 function collectCookieSupport() {
   return collectSignal('cookieSupport', () => {
     try {
@@ -1052,7 +1031,7 @@ function collectCookieSupport() {
   });
 }
 
-// ---------- SIGNAL 23 [Early/Critical] — Hardware Concurrency + Device Memory ----------
+// ---------- SIGNAL 20 — Hardware Concurrency + Device Memory ----------
 function collectHardwareInfo() {
   return collectSignal('hardwareInfo', () => ({
     hardwareConcurrency: navigator.hardwareConcurrency,
@@ -1060,7 +1039,7 @@ function collectHardwareInfo() {
   }));
 }
 
-// ---------- SIGNAL 24 [Early/Critical] — Touch Support ----------
+// ---------- SIGNAL 21 — Touch Support ----------
 function collectTouchSupport() {
   return collectSignal('touchSupport', () => {
     const nav = navigator;
@@ -1080,7 +1059,7 @@ function collectTouchSupport() {
   });
 }
 
-// ---------- SIGNAL 25 [Early/Critical] — Connection Info ----------
+// ---------- SIGNAL 22 — Connection Info ----------
 function collectConnectionInfo() {
   return collectSignal('connectionInfo', () => {
     const conn = navigator.connection;
@@ -1095,12 +1074,12 @@ function collectConnectionInfo() {
   });
 }
 
-// ---------- SIGNAL 26 [Early/Critical] — Network Online Status ----------
+// ---------- SIGNAL 23 — Network Online Status ----------
 function collectOnlineStatus() {
   return collectSignal('onlineStatus', () => Boolean(navigator.onLine));
 }
 
-// ---------- SIGNAL 27 [Standard] — CSS Media Features (merged, legacy) ----------
+// ---------- SIGNAL 24 — CSS Media Features (merged, legacy) ----------
 function collectMediaFeatures() {
   return collectSignal('mediaFeatures', () => {
     const mq = q => { try { return window.matchMedia(q).matches; } catch (_) { return undefined; } };
@@ -1138,7 +1117,7 @@ function collectMediaFeatures() {
   });
 }
 
-// ---------- SIGNAL 28 [Standard] — Prefers Color Scheme ----------
+// ---------- SIGNAL 25 — Prefers Color Scheme ----------
 function collectPrefersColorScheme() {
   return collectSignal('prefersColorScheme', () => {
     const mq = q => { try { return window.matchMedia(q).matches; } catch (_) { return null; } };
@@ -1148,7 +1127,7 @@ function collectPrefersColorScheme() {
   });
 }
 
-// ---------- SIGNAL 29 [Standard] — Color Gamut (fp4 individual) ----------
+// ---------- SIGNAL 26 — Color Gamut ----------
 function collectColorGamut() {
   return collectSignal('colorGamut', () => {
     const mq = q => { try { return window.matchMedia(q).matches; } catch (_) { return false; } };
@@ -1159,7 +1138,7 @@ function collectColorGamut() {
   });
 }
 
-// ---------- SIGNAL 30 [Standard] — Reduced Motion preference (fp4 individual) ----------
+// ---------- SIGNAL 27 — Reduced Motion preference ----------
 function collectReducedMotion() {
   return collectSignal('reducedMotion', () => {
     try {
@@ -1170,7 +1149,7 @@ function collectReducedMotion() {
   });
 }
 
-// ---------- SIGNAL 31 [Standard] — Contrast preference (fp4 individual) ----------
+// ---------- SIGNAL 28 — Contrast preference ----------
 function collectContrast() {
   return collectSignal('contrast', () => {
     const mq = q => { try { return window.matchMedia(q).matches; } catch (_) { return false; } };
@@ -1182,7 +1161,7 @@ function collectContrast() {
   });
 }
 
-// ---------- SIGNAL 32 [Standard] — HDR display capability (fp4 individual) ----------
+// ---------- SIGNAL 29 — HDR display capability ----------
 function collectHdr() {
   return collectSignal('hdr', () => {
     try {
@@ -1193,7 +1172,7 @@ function collectHdr() {
   });
 }
 
-// ---------- SIGNAL 33 [Standard] — Inverted Colors (fp4 individual) ----------
+// ---------- SIGNAL 30 — Inverted Colors ----------
 function collectInvertedColors() {
   return collectSignal('invertedColors', () => {
     try {
@@ -1204,7 +1183,7 @@ function collectInvertedColors() {
   });
 }
 
-// ---------- SIGNAL 34 [Standard] — Forced Colors (fp4 individual) ----------
+// ---------- SIGNAL 31 — Forced Colors ----------
 function collectForcedColors() {
   return collectSignal('forcedColors', () => {
     try {
@@ -1215,7 +1194,7 @@ function collectForcedColors() {
   });
 }
 
-// ---------- SIGNAL 35 [Standard] — Monochrome depth (fp4 individual) ----------
+// ---------- SIGNAL 32 — Monochrome depth ----------
 function collectMonochrome() {
   return collectSignal('monochrome', () => {
     try {
@@ -1228,7 +1207,7 @@ function collectMonochrome() {
   });
 }
 
-// ---------- SIGNAL 36 [Standard] — CSS System Colors (36 system colors) ----------
+// ---------- SIGNAL 33 — CSS System Colors (36 system colors) ----------
 function collectSystemColors() {
   return collectSignal('systemColors', () => {
     const div = document.createElement('div');
@@ -1281,7 +1260,7 @@ function collectSystemColors() {
   });
 }
 
-// ---------- SIGNAL 37 [Standard] — CSS Feature Detection (computed style properties) ----------
+// ---------- SIGNAL 34 — CSS Feature Detection (computed style properties) ----------
 function collectCssFeatures() {
   return collectSignal('cssFeatures', () => {
     const div = document.createElement('div');
@@ -1316,15 +1295,7 @@ function collectCssFeatures() {
   });
 }
 
-// ---------- SIGNAL 38 [Standard] — CSS Supports: backdrop-filter ----------
-function collectCssBackdropFilter() {
-  return collectSignal('cssBackdropFilter', () => {
-    if (typeof CSS === 'undefined') return null;
-    return CSS.supports('backdrop-filter', 'blur(2px)');
-  });
-}
-
-// ---------- SIGNAL 39 [Standard] — Plugins ----------
+// ---------- SIGNAL 35 — Plugins ----------
 function collectPlugins() {
   return collectSignal('plugins', () => {
     const plugins = navigator.plugins;
@@ -1343,16 +1314,7 @@ function collectPlugins() {
   });
 }
 
-// ---------- SIGNAL 40 [Standard] — plugins.length ----------
-function collectPluginsLength() {
-  return collectSignal('pluginsLength', () => {
-    if (navigator.plugins === undefined) return null;
-    if (navigator.plugins.length === undefined) return null;
-    return navigator.plugins.length;
-  });
-}
-
-// ---------- SIGNAL 41 [Standard] — MimeTypes Count ----------
+// ---------- SIGNAL 36 — MimeTypes Count ----------
 function collectMimeTypesCount() {
   return collectSignal('mimeTypesCount', () => {
     if (navigator.mimeTypes === undefined) return null;
@@ -1361,7 +1323,7 @@ function collectMimeTypesCount() {
   });
 }
 
-// ---------- SIGNAL 42 [Standard] — MimeType Prototype Check ----------
+// ---------- SIGNAL 37 — MimeType Prototype Check ----------
 function collectMimeTypePrototype() {
   return collectSignal('mimeTypePrototype', () => {
     if (navigator.mimeTypes === undefined) return null;
@@ -1378,7 +1340,7 @@ function collectMimeTypePrototype() {
   });
 }
 
-// ---------- SIGNAL 43 [Standard] — Plugin Prototype Check ----------
+// ---------- SIGNAL 38 — Plugin Prototype Check ----------
 function collectPluginPrototype() {
   return collectSignal('pluginPrototype', () => {
     if (navigator.plugins === undefined) return null;
@@ -1395,42 +1357,12 @@ function collectPluginPrototype() {
   });
 }
 
-// ---------- SIGNAL 44 [Standard] — PDF Viewer Enabled ----------
+// ---------- SIGNAL 39 — PDF Viewer Enabled ----------
 function collectPdfViewerEnabled() {
   return collectSignal('pdfViewerEnabled', () => navigator.pdfViewerEnabled);
 }
 
-// ---------- SIGNAL 45 [Standard] — Apple Pay ----------
-function collectApplePay() {
-  return collectSignal('applePay', () => {
-    const APS = window.ApplePaySession;
-    if (typeof APS?.canMakePayments !== 'function') return -1;
-    // Cross-origin iframe check (fp4 hn())
-    let inCrossOriginFrame = false;
-    let w = window;
-    while (true) {
-      const p = w.parent;
-      if (!p || p === w) break;
-      try {
-        if (p.location.origin !== w.location.origin) { inCrossOriginFrame = true; break; }
-      } catch (e) {
-        if (e instanceof Error && e.name === 'SecurityError') { inCrossOriginFrame = true; break; }
-        throw e;
-      }
-      w = p;
-    }
-    if (inCrossOriginFrame) return -3;
-    try {
-      return APS.canMakePayments() ? 1 : 0;
-    } catch (e) {
-      if (e instanceof Error && e.name === 'InvalidAccessError' &&
-          /\bfrom\b.*\binsecure\b/i.test(e.message)) return -2;
-      throw e;
-    }
-  });
-}
-
-// ---------- SIGNAL 46 [Standard] — Private Click Measurement ----------
+// ---------- SIGNAL 40 — Private Click Measurement ----------
 function collectPrivateClickMeasurement() {
   return collectSignal('privateClickMeasurement', () => {
     const a = document.createElement('a');
@@ -1439,7 +1371,7 @@ function collectPrivateClickMeasurement() {
   });
 }
 
-// ---------- SIGNAL 47 [Standard] — Canvas 2D Fingerprint (geometry + text — raw dataURL, matches fp4) ----------
+// ---------- SIGNAL 41 — Canvas 2D Fingerprint (geometry + text — raw dataURL) ----------
 function collectCanvas2D() {
   return collectSignal('canvas2d', () => {
     const canvas = document.createElement('canvas');
@@ -1448,7 +1380,7 @@ function collectCanvas2D() {
     if (!ctx || !canvas.toDataURL)
       return { winding: null, geometry: 'unsupported', text: 'unsupported' };
 
-    // Winding rule test (same as fp4)
+    // Winding rule test
     ctx.rect(0, 0, 10, 10);
     ctx.rect(2, 2, 6, 6);
     const winding = !ctx.isPointInPath(5, 5, 'evenodd');
@@ -1464,7 +1396,7 @@ function collectCanvas2D() {
     tc.fillText(emoji, 2, 15);
     tc.fillStyle = 'rgba(102, 204, 0, 0.2)'; tc.font = '18pt Arial';
     tc.fillText(emoji, 4, 45);
-    // fp4 renders text canvas twice and checks stability
+    // Render text canvas twice and check stability
     const text1 = textCanvas.toDataURL();
     const text2 = textCanvas.toDataURL();
     if (text1 !== text2) return { winding, geometry: 'unstable', text: 'unstable' };
@@ -1492,7 +1424,7 @@ function collectCanvas2D() {
   });
 }
 
-// ---------- SIGNAL 48 [Standard] — Canvas PRNG Test (seeded random pixels → pixel data hash) ----------
+// ---------- SIGNAL 42 — Canvas PRNG Test (seeded random pixels → pixel data hash) ----------
 function collectCanvasPrng() {
   return collectSignal('canvasPrng', () => {
     const SIZE = 50;
@@ -1528,14 +1460,14 @@ function collectCanvasPrng() {
   });
 }
 
-// ---------- SIGNAL 49 [Standard] — WebGL Basics (renderer strings, matches fp4 webGlBasics) ----------
+// ---------- SIGNAL 43 — WebGL Basics (renderer strings) ----------
 function collectWebGL() {
   return collectSignal('webGL', () => {
     const gl = _getWebGLContext();
     if (!gl) return -1;
     if (typeof gl.getParameter !== 'function') return -2;
 
-    // fp4: Firefox (Sn()) hides debug renderer info
+    // Firefox (Sn()) hides debug renderer info
     const hideRenderer = _isGecko();
     const debugExt = hideRenderer ? null : gl.getExtension('WEBGL_debug_renderer_info');
 
@@ -1550,7 +1482,7 @@ function collectWebGL() {
   });
 }
 
-// ---------- SIGNAL 50 [Standard] — WebGL Extensions (separate signal, matches fp4 webGlExtensions) ----------
+// ---------- SIGNAL 44 — WebGL Extensions (separate signal) ----------
 function collectWebGLExtensions() {
   return collectSignal('webGLExtensions', () => {
     const gl = _getWebGLContext();
@@ -1585,7 +1517,7 @@ function collectWebGLExtensions() {
     const extensionParameters = [];
 
     for (const ext of supportedExtensions) {
-      // fp4 hides WEBGL_debug_renderer_info for Firefox; WEBGL_polygon_mode for Chrome/WebKit
+      // Hide certain extensions for specific browsers
       if (ext === 'WEBGL_debug_renderer_info' && _isGecko()) continue;
       if (ext === 'WEBGL_polygon_mode' && (_isChromium() || _isWebKit())) continue;
       const extObj = gl.getExtension(ext);
@@ -1611,7 +1543,7 @@ function collectWebGLExtensions() {
   });
 }
 
-// ---------- SIGNAL 51 [Standard] — WebGL Canvas Hash (renders scene, hashes output) ----------
+// ---------- SIGNAL 45 — WebGL Canvas Hash (renders scene, hashes output) ----------
 function collectWebGLCanvas() {
   return collectSignal('webGLCanvas', () => {
     const canvas = document.createElement('canvas');
@@ -1647,10 +1579,10 @@ function collectWebGLCanvas() {
   });
 }
 
-// ---------- SIGNAL 52 [Standard] — Audio Fingerprint (OfflineAudioContext, matches fp4 J()/audio) ----------
+// ---------- SIGNAL 46 — Audio Fingerprint (OfflineAudioContext) ----------
 async function collectAudioFingerprint() {
   return collectSignal('audioFingerprint', async () => {
-    // iOS 18 Safari + new Chromium-era guard (returns -4, same as fp4)
+    // iOS 18 Safari + new Chromium-era guard (returns -4)
     if (_isWebKit() && _isChromiumNewEra() && _isIOS()) return -4;
 
     const AudioCtx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
@@ -1683,7 +1615,7 @@ async function collectAudioFingerprint() {
     compressor.connect(ctx.destination);
     oscillator.start(0);
 
-    // fp4 retry logic: handles 'suspended' state (mobile browsers throttle audio)
+    // Retry logic: handles 'suspended' state (mobile browsers throttle audio)
     const MAX_RETRIES   = 3;
     const RETRY_DELAY   = 500;
     const STATE_TIMEOUT = 500;
@@ -1716,7 +1648,7 @@ async function collectAudioFingerprint() {
               setTimeout(timedOut, Math.min(STATE_TIMEOUT, startTime + TOTAL_TIMEOUT - Date.now()));
               break;
             case 'suspended':
-              // Don't retry if tab is hidden (matches fp4 document.hidden check)
+              // Don't retry if tab is hidden
               if (!document.hidden) retries++;
               if (retries >= MAX_RETRIES) { settle(-3); return; }
               setTimeout(tryStart, RETRY_DELAY);
@@ -1733,7 +1665,7 @@ async function collectAudioFingerprint() {
   });
 }
 
-// ---------- SIGNAL 53 [Standard] — Audio Context Latency ----------
+// ---------- SIGNAL 47 — Audio Context Latency ----------
 function collectAudioLatency() {
   return collectSignal('audioLatency', () => {
     if (!window.AudioContext) return -1;
@@ -1748,7 +1680,7 @@ function collectAudioLatency() {
   });
 }
 
-// ---------- SIGNAL 54 [Standard] — Font Detection (inside isolated iframe — matches fp4 xn.fonts) ----------
+// ---------- SIGNAL 48 — Font Detection (inside isolated iframe) ----------
 async function collectFonts() {
   return collectSignal('fonts', () => _withIframe(async (iframe, win) => {
     const iDoc  = win.document;
@@ -1768,7 +1700,7 @@ async function collectFonts() {
     ];
 
     iBody.style.fontSize = '48px';
-    // fp4: on Chromium adjust zoom to counteract device pixel ratio scaling
+    // On Chromium adjust zoom to counteract device pixel ratio scaling
     if (_isChromium()) iBody.style.zoom = String(1 / win.devicePixelRatio);
     else if (_isWebKit()) iBody.style.zoom = 'reset';
 
@@ -1809,7 +1741,7 @@ async function collectFonts() {
   }, '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body></body></html>'));
 }
 
-// ---------- SIGNAL 55 [Standard] — Font Preferences ----------
+// ---------- SIGNAL 49 — Font Preferences ----------
 async function collectFontPreferences() {
   return collectSignal('fontPreferences', () => _withIframe(async (iframe, win) => {
     const iDoc  = win.document;
@@ -1828,7 +1760,7 @@ async function collectFontPreferences() {
     filler.textContent = Array(Math.floor(FRAME_WIDTH / 20)).fill('word').join(' ');
     iBody.appendChild(filler);
 
-    // Font stacks to measure (matches fp4 vn)
+    // Font stacks to measure
     const stacks = {
       default:  {},
       apple:    { font: '-apple-system-body' },
@@ -1859,7 +1791,7 @@ async function collectFontPreferences() {
   }, '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body></body></html>'));
 }
 
-// ---------- SIGNAL 56 [Standard] — Speech Synthesis Voices ----------
+// ---------- SIGNAL 50 — Speech Synthesis Voices ----------
 async function collectSpeechVoices() {
   return collectSignal('speechVoices', () => new Promise(resolve => {
     const synth = window.speechSynthesis;
@@ -1884,7 +1816,7 @@ async function collectSpeechVoices() {
   }));
 }
 
-// ---------- SIGNAL 57 [Standard] — Math Fingerprint ----------
+// ---------- SIGNAL 51 — Math Fingerprint - Measures CPU floating-point precision differences ----------
 function collectMathFingerprint() {
   return collectSignal('mathFingerprint', () => {
     const m = Math;
@@ -1925,7 +1857,7 @@ function collectMathFingerprint() {
   });
 }
 
-// ---------- SIGNAL 58 [Standard] — Float32 NaN Byte (FPU implementation check) ----------
+// ---------- SIGNAL 52 — Float32 NaN Byte (FPU implementation check) - how your CPU represents NaN (Not a Number) in memory ----------
 function collectFloat32NanByte() {
   return collectSignal('float32NanByte', () => {
     const f32 = new Float32Array(1);
@@ -1936,12 +1868,12 @@ function collectFloat32NanByte() {
   });
 }
 
-// ---------- SIGNAL 59 [Standard] — eval.toString() Length ----------
+// ---------- SIGNAL 53 — eval.toString() Length - Different Browsers = Different Lengths ----------
 function collectEvalLength() {
   return collectSignal('evalLength', () => eval.toString().length);
 }
 
-// ---------- SIGNAL 60 [Standard] — Error Stack Hash ----------
+// ---------- SIGNAL 54 — Error Stack Hash ----------
 function collectErrorTrace() {
   return collectSignal('errorTrace', () => {
     try {
@@ -1953,7 +1885,7 @@ function collectErrorTrace() {
   });
 }
 
-// ---------- SIGNAL 61 [Standard] — Error Stack Trace Raw (unhashed) ----------
+// ---------- SIGNAL 55 — Error Stack Trace Raw (unhashed) ----------
 function collectErrorStackFormat() {
   return collectSignal('errorStackFormat', () => {
     try {
@@ -1971,7 +1903,7 @@ function collectErrorStackFormat() {
   });
 }
 
-// ---------- SIGNAL 62 [Standard] — Function.prototype.bind.toString() ----------
+// ---------- SIGNAL 56 — Function.prototype.bind.toString() ----------
 function collectFunctionBindToString() {
   return collectSignal('functionBindToString', () => {
     if (typeof Function.prototype.bind !== 'function') return null;
@@ -1979,7 +1911,7 @@ function collectFunctionBindToString() {
   });
 }
 
-// ---------- SIGNAL 63 [Standard] — Firefox .toSource() Support ----------
+// ---------- SIGNAL 57 — Firefox .toSource() Support ----------
 function collectFirefoxToSource() {
   return collectSignal('firefoxToSource', () => {
     try {
@@ -1995,7 +1927,7 @@ function collectFirefoxToSource() {
   });
 }
 
-// ---------- SIGNAL 64 [Standard] — Math.random() PRNG Entropy Samples ----------
+// ---------- SIGNAL 58 — Math.random() PRNG Entropy Samples ----------
 function collectPrngEntropy() {
   return collectSignal('prngEntropy', () => {
     const samples = [];
@@ -2011,7 +1943,7 @@ function collectPrngEntropy() {
   });
 }
 
-// ---------- SIGNAL 65 [Standard] — window.close.toString() (native function check) ----------
+// ---------- SIGNAL 59 — window.close.toString() (native function check) ----------
 function collectWindowCloseFn() {
   return collectSignal('windowCloseFn', () => {
     if (window.close === undefined) return null;
@@ -2019,7 +1951,7 @@ function collectWindowCloseFn() {
   });
 }
 
-// ---------- SIGNAL 66 [Standard] — WebAssembly Feature Flags ----------
+// ---------- SIGNAL 60 — WebAssembly Feature Flags ----------
 function collectWasmFeatures() {
   return collectSignal('wasmFeatures', () => {
     const validate = WebAssembly && WebAssembly.validate;
@@ -2048,7 +1980,7 @@ function collectWasmFeatures() {
   });
 }
 
-// ---------- SIGNAL 67 [Standard] — SourceBuffer / Media Source API Types ----------
+// ---------- SIGNAL 61 — SourceBuffer / Media Source API Types ----------
 function collectSourceBufferTypes() {
   return collectSignal('sourceBufferTypes', () => [
     typeof SourceBuffer,
@@ -2056,7 +1988,7 @@ function collectSourceBufferTypes() {
   ]);
 }
 
-// ---------- SIGNAL 68 [Standard] — SharedArrayBuffer Availability ----------
+// ---------- SIGNAL 62 — SharedArrayBuffer Availability ----------
 function collectSharedArrayBuffer() {
   return collectSignal('sharedArrayBuffer', () => {
     if (typeof window.SharedArrayBuffer !== 'function') return false;
@@ -2065,17 +1997,17 @@ function collectSharedArrayBuffer() {
   });
 }
 
-// ---------- SIGNAL 69 [Standard] — Secure Context ----------
+// ---------- SIGNAL 63 — Secure Context ----------
 function collectSecureContext() {
   return collectSignal('secureContext', () => window.isSecureContext);
 }
 
-// ---------- SIGNAL 70 [Standard] — URL Protocol Detection ----------
+// ---------- SIGNAL 64 — URL Protocol Detection ----------
 function collectUrlProtocol() {
   return collectSignal('urlProtocol', () => new URL('C:/').protocol);
 }
 
-// ---------- SIGNAL 71 [Standard] — window.process (Electron / Node.js detection) ----------
+// ---------- SIGNAL 65 — window.process (Electron / Node.js detection) ----------
 function collectWindowProcess() {
   return collectSignal('windowProcess', () => {
     const proc = window.process;
@@ -2088,7 +2020,7 @@ function collectWindowProcess() {
   });
 }
 
-// ---------- SIGNAL 72 [Standard] — window Location Origin ----------
+// ---------- SIGNAL 66 — window Location Origin ----------
 function collectWindowOrigin() {
   return collectSignal('windowOrigin', () => {
     const loc  = window.location;
@@ -2105,7 +2037,7 @@ function collectWindowOrigin() {
   });
 }
 
-// ---------- SIGNAL 73 [Standard] — Document Root Attributes ----------
+// ---------- SIGNAL 67 — Document Root Attributes ----------
 function collectDocumentRootAttributes() {
   return collectSignal('documentRootAttributes', () => {
     const root = document.documentElement;
@@ -2114,7 +2046,7 @@ function collectDocumentRootAttributes() {
   });
 }
 
-// ---------- SIGNAL 74 [Standard] — document.createElement property descriptor ----------
+// ---------- SIGNAL 68 — document.createElement property descriptor ----------
 function collectCreateElementDescriptor() {
   return collectSignal('createElementDescriptor', () => {
     const desc = Object.getOwnPropertyDescriptor(document, 'createElement');
@@ -2123,7 +2055,7 @@ function collectCreateElementDescriptor() {
   });
 }
 
-// ---------- SIGNAL 75 [Standard] — Notification Permission ----------
+// ---------- SIGNAL 69 — Notification Permission ----------
 async function collectNotificationPermission() {
   return collectSignal('notificationPermission', async () => {
     if (window.Notification === undefined) return null;
@@ -2142,7 +2074,7 @@ async function collectNotificationPermission() {
   });
 }
 
-// ---------- SIGNAL 76 [Standard] — DRM / Encrypted Media Extension Probe ----------
+// ---------- SIGNAL 70 — DRM / Encrypted Media Extension Probe ----------
 async function collectDrmCapabilities() {
   return collectSignal('drmCapabilities', async () => {
     if (!navigator.requestMediaKeySystemAccess) return null;
@@ -2178,7 +2110,7 @@ async function collectDrmCapabilities() {
   });
 }
 
-// ---------- SIGNAL 77 [Standard] — MathML Rendering ----------
+// ---------- SIGNAL 71 — MathML Rendering ----------
 function collectMathMLRendering() {
   return collectSignal('mathMLRendering', () => {
     try {
@@ -2205,7 +2137,7 @@ function collectMathMLRendering() {
   });
 }
 
-// ---------- SIGNAL 78 [Standard] — iOS-specific Radio Input Font Family ----------
+// ---------- SIGNAL 72 — iOS-specific Radio Input Font Family ----------
 function collectIosRadioFont() {
   return collectSignal('iosRadioFont', () => {
     try {
@@ -2221,7 +2153,7 @@ function collectIosRadioFont() {
   });
 }
 
-// ---------- SIGNAL 79 [Standard] — navigator.webdriver ----------
+// ---------- SIGNAL 73 — navigator.webdriver ----------
 function collectWebDriver() {
   return collectSignal('webDriver', () => {
     const wd = navigator.webdriver;
@@ -2231,7 +2163,7 @@ function collectWebDriver() {
   });
 }
 
-// ---------- SIGNAL 80 [Standard] — InputEvent.isTrusted check ----------
+// ---------- SIGNAL 74 — InputEvent.isTrusted check ----------
 function collectInputEventTrusted() {
   return collectSignal('inputEventTrusted', () => {
     const InputEventCtor = window.InputEvent;
@@ -2245,7 +2177,7 @@ function collectInputEventTrusted() {
   });
 }
 
-// ---------- SIGNAL 81 [Standard] — Automation Framework Detection (window globals) ----------
+// ---------- SIGNAL 75 — Automation Framework Detection (window globals) ----------
 function collectAutomationGlobals() {
   return collectSignal('automationGlobals', () => {
     const checks = {
@@ -2275,7 +2207,7 @@ function collectAutomationGlobals() {
   });
 }
 
-// ---------- SIGNAL 82 [Standard] — Automation Window Property Scan ----------
+// ---------- SIGNAL 76 — Automation Window Property Scan ----------
 function collectAutomationWindowScan() {
   return collectSignal('automationWindowScan', () => {
     const knownBotProps = new Set([
@@ -2295,7 +2227,7 @@ function collectAutomationWindowScan() {
   });
 }
 
-// ---------- SIGNAL 83 [Standard] — objectToInspect (Browser DevTools open detection) ----------
+// ---------- SIGNAL 77 — objectToInspect (Browser DevTools open detection) ----------
 function collectObjectToInspect() {
   return collectSignal('objectToInspect', () => {
     try {
@@ -2308,119 +2240,7 @@ function collectObjectToInspect() {
   });
 }
 
-// ---------- SIGNAL 84 [Standard] — Dom Blockers (full fp4 filter list, tested via iframe injection) ----------
-async function collectAdBlocker() {
-  return collectSignal('adBlocker', async () => {
-    // Only run on iOS/Android WebKit or non-Android (matches fp4 guard)
-    if (!_isWebKit() && !_isAndroid()) return undefined;
-
-    // Base64-decode helper (matches fp4 use of atob for obfuscated selectors)
-    const d = atob;
-    const filterLists = {
-      abpIndo:              ['#Iklan-Melayang','#Kolom-Iklan-728','#SidebarIklan-wrapper','[title="ALIENBOLA" i]',d('I0JveC1CYW5uZXItYWRz')],
-      abpvn:                ['.quangcao','#mobileCatfish',d('LmNsb3NlLWFkcw=='),'[id^="bn_bottom_fixed_"]','#pmadv'],
-      adBlockFinland:       ['.mainostila',d('LnNwb25zb3JpdA=='),'.ylamainos',d('YVtocmVmKj0iL2NsaWNrdGhyZ2guYXNwPyJd'),d('YVtocmVmXj0iaHR0cHM6Ly9hcHAucmVhZHBlYWsuY29tL2FkcyJd')],
-      adBlockPersian:       ['#navbar_notice_50','.kadr','TABLE[width="140px"]','#divAgahi',d('YVtocmVmXj0iaHR0cDovL2cxLnYuZndtcm0ubmV0L2FkLyJd')],
-      adBlockWarningRemoval:['#adblock-honeypot','.adblocker-root','.wp_adblock_detect',d('LmhlYWRlci1ibG9ja2VkLWFk'),d('I2FkX2Jsb2NrZXI=')],
-      adGuardAnnoyances:    ['.hs-sosyal','#cookieconsentdiv','div[class^="app_gdpr"]','.as-oil','[data-cypress="soft-push-notification-modal"]'],
-      adGuardBase:          ['.BetterJsPopOverlay',d('I2FkXzMwMFgyNTA='),d('I2Jhbm5lcmZsb2F0MjI='),d('I2NhbXBhaWduLWJhbm5lcg=='),d('I0FkLUNvbnRlbnQ=')],
-      adGuardChinese:       [d('LlppX2FkX2FfSA=='),d('YVtocmVmKj0iLmh0aGJldDM0LmNvbSJd'),'#widget-quan',d('YVtocmVmKj0iLzg0OTkyMDIwLnh5eiJd'),d('YVtocmVmKj0iLjE5NTZobC5jb20vIl0=')],
-      adGuardFrench:        ['#pavePub',d('LmFkLWRlc2t0b3AtcmVjdGFuZ2xl'),'.mobile_adhesion','.widgetadv',d('LmFkc19iYW4=')],
-      adGuardGerman:        ['aside[data-portal-id="leaderboard"]'],
-      adGuardJapanese:      ['#kauli_yad_1',d('YVtocmVmXj0iaHR0cDovL2FkMi50cmFmZmljZ2F0ZS5uZXQvIl0='),d('Ll9wb3BJbl9pbmZpbml0ZV9hZA=='),d('LmFkZ29vZ2xl'),d('Ll9faXNib29zdFJldHVybkFk')],
-      adGuardMobile:        [d('YW1wLWF1dG8tYWRz'),d('LmFtcF9hZA=='),'amp-embed[type="24smi"]','#mgid_iframe1',d('I2FkX2ludmlld19hcmVh')],
-      adGuardRussian:       [d('YVtocmVmXj0iaHR0cHM6Ly9hZC5sZXRtZWFkcy5jb20vIl0='),d('LnJlY2xhbWE='),'div[id^="smi2adblock"]',d('ZGl2W2lkXj0iQWRGb3hfYmFubmVyXyJd'),'#psyduckpockeball'],
-      adGuardSocial:        [d('YVtocmVmXj0iLy93d3cuc3R1bWJsZXVwb24uY29tL3N1Ym1pdD91cmw9Il0='),d('YVtocmVmXj0iLy90ZWxlZ3JhbS5tZS9zaGFyZS91cmw/Il0='),'.etsy-tweet','#inlineShare','.popup-social'],
-      adGuardSpanishPortuguese:['#barraPublicidade','#Publicidade','#publiEspecial','#queTooltip','.cnt-publi'],
-      adGuardTrackingProtection:['#qoo-counter',d('YVtocmVmXj0iaHR0cDovL2NsaWNrLmhvdGxvZy5ydS8iXQ=='),d('YVtocmVmXj0iaHR0cDovL2hpdGNvdW50ZXIucnUvdG9wL3N0YXQucGhwIl0='),d('YVtocmVmXj0iaHR0cDovL3RvcC5tYWlsLnJ1L2p1bXAiXQ=='),'#top100counter'],
-      adGuardTurkish:       ['#backkapat',d('I3Jla2xhbWk='),d('YVtocmVmXj0iaHR0cDovL2Fkc2Vydi5vbnRlay5jb20udHIvIl0='),d('YVtocmVmXj0iaHR0cDovL2l6bGVuemkuY29tL2NhbXBhaWduLyJd'),d('YVtocmVmXj0iaHR0cDovL3d3dy5pbnN0YWxsYWRzLm5ldC8iXQ==')],
-      bulgarian:            [d('dGQjZnJlZW5ldF90YWJsZV9hZHM='),'#ea_intext_div','.lapni-pop-over','#xenium_hot_offers'],
-      easyList:             ['.yb-floorad',d('LndpZGdldF9wb19hZHNfd2lkZ2V0'),d('LnRyYWZmaWNqdW5reS1hZA=='),'.textad_headline',d('LnNwb25zb3JlZC10ZXh0LWxpbmtz')],
-      easyListChina:        [d('LmFwcGd1aWRlLXdyYXBbb25jbGljayo9ImJjZWJvcy5jb20iXQ=='),d('LmZyb250cGFnZUFkdk0='),'#taotaole','#aafoot.top_box','.cfa_popup'],
-      easyListCookie:       ['.ezmob-footer','.cc-CookieWarning','[data-cookie-number]',d('LmF3LWNvb2tpZS1iYW5uZXI='),'.sygnal24-gdpr-modal-wrap'],
-      easyListCzechSlovak:  ['#onlajny-stickers',d('I3Jla2xhbW5pLWJveA=='),d('LnJla2xhbWEtbWVnYWJvYXJk'),'.sklik',d('W2lkXj0ic2tsaWtSZWtsYW1hIl0=')],
-      easyListDutch:        [d('I2FkdmVydGVudGll'),d('I3ZpcEFkbWFya3RCYW5uZXJCbG9jaw=='),'.adstekst',d('YVtocmVmXj0iaHR0cHM6Ly94bHR1YmUubmwvY2xpY2svIl0='),'#semilo-lrectangle'],
-      easyListGermany:      ['#SSpotIMPopSlider',d('LnNwb25zb3JsaW5rZ3J1ZW4='),d('I3dlcmJ1bmdza3k='),d('I3Jla2xhbWUtcmVjaHRzLW1pdHRl'),d('YVtocmVmXj0iaHR0cHM6Ly9iZDc0Mi5jb20vIl0=')],
-      easyListItaly:        [d('LmJveF9hZHZfYW5udW5jaQ=='),'.sb-box-pubbliredazionale',d('YVtocmVmXj0iaHR0cDovL2FmZmlsaWF6aW9uaWFkcy5zbmFpLml0LyJd'),d('YVtocmVmXj0iaHR0cHM6Ly9hZHNlcnZlci5odG1sLml0LyJd'),d('YVtocmVmXj0iaHR0cHM6Ly9hZmZpbGlhemlvbmlhZHMuc25haS5pdC8iXQ==')],
-      easyListLithuania:    [d('LnJla2xhbW9zX3RhcnBhcw=='),d('LnJla2xhbW9zX251b3JvZG9z'),d('aW1nW2FsdD0iUmVrbGFtaW5pcyBza3lkZWxpcyJd'),d('aW1nW2FsdD0iRGVkaWt1b3RpLmx0IHNlcnZlcmlhaSJd'),d('aW1nW2FsdD0iSG9zdGluZ2FzIFNlcnZlcmlhaS5sdCJd')],
-      estonian:             [d('QVtocmVmKj0iaHR0cDovL3BheTRyZXN1bHRzMjQuZXUiXQ==')],
-      fanboyAnnoyances:     ['#ac-lre-player','.navigate-to-top','#subscribe_popup','.newsletter_holder','#back-top'],
-      fanboyAntiFacebook:   ['.util-bar-module-firefly-visible'],
-      fanboyEnhancedTrackers:['.open.pushModal','#issuem-leaky-paywall-articles-zero-remaining-nag','#sovrn_container','div[class$="-hide"][zoompage-fontsize][style="display: block;"]','.BlockNag__Card'],
-      fanboySocial:         ['#FollowUs','#meteored_share','#social_follow','.article-sharer','.community__social-desc'],
-      frellwitSwedish:      [d('YVtocmVmKj0iY2FzaW5vcHJvLnNlIl1bdGFyZ2V0PSJfYmxhbmsiXQ=='),d('YVtocmVmKj0iZG9rdG9yLXNlLm9uZWxpbmsubWUiXQ=='),'article.category-samarbete',d('ZGl2LmhvbGlkQWRz'),'ul.adsmodern'],
-      greekAdBlock:         [d('QVtocmVmKj0iYWRtYW4ub3RlbmV0LmdyL2NsaWNrPyJd'),d('QVtocmVmKj0iaHR0cDovL2F4aWFiYW5uZXJzLmV4b2R1cy5nci8iXQ=='),d('QVtocmVmKj0iaHR0cDovL2ludGVyYWN0aXZlLmZvcnRobmV0LmdyL2NsaWNrPyJd'),'DIV.agores300','TABLE.advright'],
-      hungarian:            ['#cemp_doboz','.optimonk-iframe-container',d('LmFkX19tYWlu'),d('W2NsYXNzKj0iR29vZ2xlQWRzIl0='),'#hirdetesek_box'],
-      iDontCareAboutCookies:['.alert-info[data-block-track*="CookieNotice"]','.ModuleTemplateCookieIndicator','.o--cookies--container','#cookies-policy-sticky','#stickyCookieBar'],
-      icelandicAbp:         [d('QVtocmVmXj0iL2ZyYW1ld29yay9yZXNvdXJjZXMvZm9ybXMvYWRzLmFzcHgiXQ==')],
-      latvian:              [d('YVtocmVmPSJodHRwOi8vd3d3LnNhbGlkemluaS5sdi8iXVtzdHlsZT0iZGlzcGxheTogYmxvY2s7IHdpZHRoOiAxMjBweDsgaGVpZ2h0OiA0MHB4OyBvdmVyZmxvdzogaGlkZGVuOyBwb3NpdGlvbjogcmVsYXRpdmU7Il0='),d('YVtocmVmPSJodHRwOi8vd3d3LnNhbGlkemluaS5sdi8iXVtzdHlsZT0iZGlzcGxheTogYmxvY2s7IHdpZHRoOiA4OHB4OyBoZWlnaHQ6IDMxcHg7IG92ZXJmbG93OiBoaWRkZW47IHBvc2l0aW9uOiByZWxhdGl2ZTsiXQ==')],
-      listKr:               [d('YVtocmVmKj0iLy9hZC5wbGFuYnBsdXMuY28ua3IvIl0='),d('I2xpdmVyZUFkV3JhcHBlcg=='),d('YVtocmVmKj0iLy9hZHYuaW1hZHJlcC5jby5rci8iXQ=='),d('aW5zLmZhc3R2aWV3LWFk'),'.revenue_unit_item.dable'],
-      listeAr:              [d('LmplbWluaUxCMUFk'),'.right-and-left-sponsers',d('YVtocmVmKj0iLmFmbGFtLmluZm8iXQ=='),d('YVtocmVmKj0iYm9vcmFxLm9yZyJd'),d('YVtocmVmKj0iZHViaXp6bGUuY29tL2FyLz91dG1fc291cmNlPSJd')],
-      listeFr:              [d('YVtocmVmXj0iaHR0cDovL3Byb21vLnZhZG9yLmNvbS8iXQ=='),d('I2FkY29udGFpbmVyX3JlY2hlcmNoZQ=='),d('YVtocmVmKj0id2Vib3JhbWEuZnIvZmNnaS1iaW4vIl0='),'.site-pub-interstitiel','div[id^="crt-"][data-criteo-id]'],
-      officialPolish:       ['#ceneo-placeholder-ceneo-12',d('W2hyZWZePSJodHRwczovL2FmZi5zZW5kaHViLnBsLyJd'),d('YVtocmVmXj0iaHR0cDovL2Fkdm1hbmFnZXIudGVjaGZ1bi5wbC9yZWRpcmVjdC8iXQ=='),d('YVtocmVmXj0iaHR0cDovL3d3dy50cml6ZXIucGwvP3V0bV9zb3VyY2UiXQ=='),d('ZGl2I3NrYXBpZWNfYWQ=')],
-      ro:                   [d('YVtocmVmXj0iLy9hZmZ0cmsuYWx0ZXgucm8vQ291bnRlci9DbGljayJd'),d('YVtocmVmXj0iaHR0cHM6Ly9ibGFja2ZyaWRheXNhbGVzLnJvL3Ryay9zaG9wLyJd'),d('YVtocmVmXj0iaHR0cHM6Ly9ldmVudC4ycGVyZm9ybWFudC5jb20vZXZlbnRzL2NsaWNrIl0='),d('YVtocmVmXj0iaHR0cHM6Ly9sLnByb2ZpdHNoYXJlLnJvLyJd'),'a[href^="/url/"]'],
-      ruAd:                 [d('YVtocmVmKj0iLy9mZWJyYXJlLnJ1LyJd'),d('YVtocmVmKj0iLy91dGltZy5ydS8iXQ=='),d('YVtocmVmKj0iOi8vY2hpa2lkaWtpLnJ1Il0='),'#pgeldiz','.yandex-rtb-block'],
-      thaiAds:              ['a[href*=macau-uta-popup]',d('I2Fkcy1nb29nbGUtbWlkZGxlX3JlY3RhbmdsZS1ncm91cA=='),d('LmFkczMwMHM='),'.bumq','.img-kosana'],
-      webAnnoyancesUltralist:['#mod-social-share-2','#social-tools',d('LmN0cGwtZnVsbGJhbm5lcg=='),'.zergnet-recommend','.yt.btn-link.btn-md.btn'],
-    };
-
-    // Collect all selectors flat, test visibility via iframe injection
-    const allSelectors = [].concat(...Object.values(filterLists));
-
-    return _withIframe(async (iframe, win) => {
-      const iDoc  = win.document;
-      const iBody = iDoc.body;
-
-      // Create a wrapper + one div per selector, append to iframe
-      const wrapper = iDoc.createElement('div');
-      wrapper.style.setProperty('visibility', 'hidden', 'important');
-      wrapper.style.setProperty('display', 'block', 'important');
-
-      const elements = allSelectors.map(sel => {
-        // Parse selector into tag + attrs/classes/ids (simplified from fp4 _())
-        let el;
-        try {
-          const tagMatch = /^([a-z][a-z0-9]*)/i.exec(sel);
-          el = iDoc.createElement(tagMatch ? tagMatch[1] : 'div');
-          // Apply classes
-          for (const cls of (sel.match(/\.([\\w-]+)/g) || [])) {
-            el.className += ' ' + cls.slice(1);
-          }
-          // Apply id
-          const idMatch = /#([\\w-]+)/.exec(sel);
-          if (idMatch) el.id = idMatch[1];
-        } catch (_) { el = iDoc.createElement('div'); }
-        el.style.setProperty('visibility', 'hidden', 'important');
-        el.style.setProperty('display', 'block', 'important');
-        const wrap = iDoc.createElement('div');
-        wrap.style.setProperty('visibility', 'hidden', 'important');
-        wrap.style.setProperty('display', 'block', 'important');
-        wrap.appendChild(el);
-        wrapper.appendChild(wrap);
-        return el;
-      });
-
-      iBody.appendChild(wrapper);
-
-      // A selector is "blocked" if the element has no offsetParent (display:none by ad blocker)
-      const blocked = {};
-      for (let i = 0; i < allSelectors.length; i++) {
-        blocked[allSelectors[i]] = !elements[i].offsetParent;
-      }
-
-      // A filter list fires when >60% of its selectors are blocked
-      const fired = [];
-      for (const [name, sels] of Object.entries(filterLists)) {
-        const hits = sels.filter(s => blocked[s]).length;
-        if (hits > 0.6 * sels.length) fired.push(name);
-      }
-      fired.sort();
-      return fired;
-    });
-  });
-}
-
-// ---------- SIGNAL 85 [Standard] — window.external.toString() (IE/Edge fingerprint) ----------
+// ---------- SIGNAL 78 — window.external.toString() (IE/Edge fingerprint) ----------
 function collectWindowExternal() {
   return collectSignal('windowExternal', () => {
     if (window.external === undefined) return null;
@@ -2429,7 +2249,7 @@ function collectWindowExternal() {
   });
 }
 
-// ---------- SIGNAL 86 [Extended/Pro] — Incognito / Private Browsing detection (StorageManager quota + FileSystem API) ----------
+// ---------- SIGNAL 79 — Incognito / Private Browsing detection (StorageManager quota + FileSystem API) ----------
 async function collectIncognito() {
   return collectSignal('incognito', async () => {
     // Chrome/Edge private: StorageManager.estimate() quota is capped at ~120 MB
@@ -2456,7 +2276,7 @@ async function collectIncognito() {
   });
 }
 
-// ---------- SIGNAL 87 [Extended/Pro] — Reduced Transparency preference (separate from mediaFeatures) ----------
+// ---------- SIGNAL 80 — Reduced Transparency preference (separate from mediaFeatures) ----------
 function collectReducedTransparency() {
   return collectSignal('reducedTransparency', () => {
     try {
@@ -2467,7 +2287,7 @@ function collectReducedTransparency() {
   });
 }
 
-// ---------- SIGNAL 88 [Extended/Pro] — Primary input hover capability (hover: hover / none) ----------
+// ---------- SIGNAL 81 — Primary input hover capability (hover: hover / none) ----------
 function collectHoverNone() {
   return collectSignal('hoverNone', () => {
     try {
@@ -2478,7 +2298,7 @@ function collectHoverNone() {
   });
 }
 
-// ---------- SIGNAL 89 [Extended/Pro] — Any input hover capability (any-hover: hover / none) ----------
+// ---------- SIGNAL 82 — Any input hover capability (any-hover: hover / none) ----------
 function collectAnyHoverNone() {
   return collectSignal('anyHoverNone', () => {
     try {
@@ -2489,7 +2309,7 @@ function collectAnyHoverNone() {
   });
 }
 
-// ---------- SIGNAL 90 [Extended/Pro] — Primary pointer accuracy (pointer: coarse / fine / none) ----------
+// ---------- SIGNAL 83 — Primary pointer accuracy (pointer: coarse / fine / none) ----------
 function collectPointerCoarse() {
   return collectSignal('pointerCoarse', () => {
     try {
@@ -2501,7 +2321,7 @@ function collectPointerCoarse() {
   });
 }
 
-// ---------- SIGNAL 91 [Extended/Pro] — Any pointer accuracy (any-pointer: coarse / fine) ----------
+// ---------- SIGNAL 84 — Any pointer accuracy (any-pointer: coarse / fine) ----------
 function collectAnyPointerCoarse() {
   return collectSignal('anyPointerCoarse', () => {
     try {
@@ -2512,7 +2332,7 @@ function collectAnyPointerCoarse() {
   });
 }
 
-// ---------- SIGNAL 92 [Extended/Pro] — StorageManager quota + usage estimate (persisted flag) ----------
+// ---------- SIGNAL 85 — StorageManager quota + usage estimate (persisted flag) ----------
 async function collectStorageEstimate() {
   return collectSignal('storageEstimate', async () => {
     try {
@@ -2530,24 +2350,7 @@ async function collectStorageEstimate() {
   });
 }
 
-// ---------- SIGNAL 93 [Extended/Pro] — Battery status (level, charging, chargingTime, dischargingTime) ----------
-async function collectBattery() {
-  return collectSignal('battery', async () => {
-    try {
-      const getBattery = navigator.getBattery;
-      if (typeof getBattery !== 'function') return null;
-      const b = await getBattery.call(navigator);
-      return {
-        level:           b.level,
-        charging:        b.charging,
-        chargingTime:    b.chargingTime,
-        dischargingTime: b.dischargingTime,
-      };
-    } catch (_) { return null; }
-  });
-}
-
-// ---------- SIGNAL 94 [Extended/Pro] — Permissions API states (camera, microphone, geolocation, notifications, clipboard-read) ----------
+// ---------- SIGNAL 86 — Permissions API states (camera, microphone, geolocation, notifications, clipboard-read) ----------
 async function collectPermissions() {
   return collectSignal('permissions', async () => {
     const pm = navigator.permissions;
@@ -2566,7 +2369,7 @@ async function collectPermissions() {
   });
 }
 
-// ---------- SIGNAL 95 [Extended/Pro] — RTCPeerConnection local IP / subnet detection via ICE candidates ----------
+// ---------- SIGNAL 87 — RTCPeerConnection local IP / subnet detection via ICE candidates ----------
 async function collectRtcPeerConnection() {
   return collectSignal('rtcPeerConnection', async () => {
     const RTC = window.RTCPeerConnection ||
@@ -2606,7 +2409,7 @@ async function collectRtcPeerConnection() {
   });
 }
 
-// ---------- SIGNAL 96 [Extended/Pro] — MediaDevices enumerate — count of audioinput / audiooutput / videoinput devices ----------
+// ---------- SIGNAL 88 — MediaDevices enumerate — count of audioinput / audiooutput / videoinput devices ----------
 async function collectMediaDevices() {
   return collectSignal('mediaDevices', async () => {
     try {
@@ -2622,7 +2425,7 @@ async function collectMediaDevices() {
   });
 }
 
-// ---------- SIGNAL 97 [Extended/Pro] — Browser scale factor / effective DPR via canvas pixel measurement ----------
+// ---------- SIGNAL 89 — Browser scale factor / effective DPR via canvas pixel measurement ----------
 function collectBrowserScaleFactor() {
   return collectSignal('browserScaleFactor', () => {
     try {
@@ -2638,7 +2441,7 @@ function collectBrowserScaleFactor() {
   });
 }
 
-// ---------- SIGNAL 98 [Extended/Pro] — API availability flags — Bluetooth, USB, Serial, XR, MIDI, Gamepad, PaymentRequest … ----------
+// ---------- SIGNAL 90 — API availability flags — Bluetooth, USB, Serial, XR, MIDI, Gamepad, PaymentRequest … ----------
 function collectApiAvailability() {
   return collectSignal('apiAvailability', () => {
     const n = window, nav = navigator;
@@ -2670,33 +2473,30 @@ async function collectAllSignals() {
   const start = performance.now();
 
   const results = await Promise.all([
-    // ── Early/Critical: Navigator / Browser Identity ──────────────────────
+    // Navigator / Browser Identity ──────────────────────
     collectUserAgent(),
     collectClientHints(),
     collectPlatform(),
     collectNavigatorLanguage(),
     collectLanguages(),
     collectNavigatorExtras(),
-    collectAppVersion(),
-    collectProductSub(),
     collectVendorInfo(),
     collectNavigatorFunctionNames(),
     collectNavigatorDescriptors(),
-    collectUaDataAvailable(),
 
-    // ── Early/Critical: Screen / Display ──────────────────────────────────
+    // Screen / Display ──────────────────────────────────
     collectScreenInfo(),
     collectScreenFrame(),
     collectWindowDimensions(),
     collectHighDpi(),
 
-    // ── Early/Critical: Time & Locale ─────────────────────────────────────
+    // Time & Locale ─────────────────────────────────────
     collectTimezone(),
     collectPerformanceTimeOrigin(),
     collectTimerPrecision(),
     collectIntlLocale(),
 
-    // ── Early/Critical: Storage & Connectivity ────────────────────────────
+    // Storage & Connectivity ────────────────────────────
     collectStorageAvailability(),
     collectCookieSupport(),
     collectHardwareInfo(),
@@ -2704,7 +2504,7 @@ async function collectAllSignals() {
     collectConnectionInfo(),
     collectOnlineStatus(),
 
-    // ── Standard: CSS Media Features ──────────────────────────────────────
+    // CSS Media Features ──────────────────────────────────────
     collectMediaFeatures(),
     collectPrefersColorScheme(),
     collectColorGamut(),
@@ -2715,42 +2515,39 @@ async function collectAllSignals() {
     collectForcedColors(),
     collectMonochrome(),
 
-    // ── Standard: CSS / Rendering ─────────────────────────────────────────
+    // CSS / Rendering ─────────────────────────────────────────
     collectSystemColors(),
     collectCssFeatures(),
-    collectCssBackdropFilter(),
 
-    // ── Standard: Plugins / MIME ──────────────────────────────────────────
+    // Plugins / MIME ──────────────────────────────────────────
     collectPlugins(),
-    collectPluginsLength(),
     collectMimeTypesCount(),
     collectMimeTypePrototype(),
     collectPluginPrototype(),
     collectPdfViewerEnabled(),
-    collectApplePay(),
     collectPrivateClickMeasurement(),
 
-    // ── Standard: Canvas / WebGL ──────────────────────────────────────────
+    // Canvas / WebGL ──────────────────────────────────────────
     collectCanvas2D(),
     collectCanvasPrng(),
     collectWebGL(),
     collectWebGLExtensions(),
     collectWebGLCanvas(),
 
-    // ── Standard: Audio ───────────────────────────────────────────────────
+    // Audio ───────────────────────────────────────────────────
     collectAudioFingerprint(),
     collectAudioLatency(),
 
-    // ── Standard: Fonts ───────────────────────────────────────────────────
+    // Fonts ───────────────────────────────────────────────────
     collectFonts(),
     collectFontPreferences(),
     collectSpeechVoices(),
 
-    // ── Standard: Math / FPU ──────────────────────────────────────────────
+    // Math / FPU ──────────────────────────────────────────────
     collectMathFingerprint(),
     collectFloat32NanByte(),
 
-    // ── Standard: JS Engine ───────────────────────────────────────────────
+    // JS Engine ───────────────────────────────────────────────
     collectEvalLength(),
     collectErrorTrace(),
     collectErrorStackFormat(),
@@ -2759,7 +2556,7 @@ async function collectAllSignals() {
     collectPrngEntropy(),
     collectWindowCloseFn(),
 
-    // ── Standard: WebAssembly / APIs ──────────────────────────────────────
+    // WebAssembly / APIs ──────────────────────────────────────
     collectWasmFeatures(),
     collectSourceBufferTypes(),
     collectSharedArrayBuffer(),
@@ -2770,22 +2567,21 @@ async function collectAllSignals() {
     collectDocumentRootAttributes(),
     collectCreateElementDescriptor(),
 
-    // ── Standard: Permissions / DRM / Rendering ───────────────────────────
+    // Permissions / DRM / Rendering ───────────────────────────
     collectNotificationPermission(),
     collectDrmCapabilities(),
     collectMathMLRendering(),
     collectIosRadioFont(),
 
-    // ── Standard: Bot / Automation Detection ──────────────────────────────
+    // Bot / Automation Detection ──────────────────────────────
     collectWebDriver(),
     collectInputEventTrusted(),
     collectAutomationGlobals(),
     collectAutomationWindowScan(),
     collectObjectToInspect(),
-    collectAdBlocker(),
     collectWindowExternal(),
 
-    // ── Extended/Pro ──────────────────────────────────────────────────────
+    // Uncategorized ──────────────────────────────────────────────────────
     collectIncognito(),
     collectReducedTransparency(),
     collectHoverNone(),
@@ -2793,7 +2589,6 @@ async function collectAllSignals() {
     collectPointerCoarse(),
     collectAnyPointerCoarse(),
     collectStorageEstimate(),
-    collectBattery(),
     collectPermissions(),
     collectRtcPeerConnection(),
     collectMediaDevices(),
