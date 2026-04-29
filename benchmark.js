@@ -116,7 +116,7 @@ async function runBenchmark() {
     const sigCount = customV1Val.signals ? Object.keys(customV1Val.signals).length : 0;
     el('custom-fuzzy-signals').textContent = `${sigCount} signals collected`;
     el('custom-fuzzy-signals').className = 'rval ok';
-    console.log('[Custom Fuzzy Match] visitorId:', customV1Val.visitorId);
+    console.log('[CUSTOM]', customV1Val);
   } else {
     el('custom-fuzzy-visitor').textContent = 'Error';
     el('custom-fuzzy-visitor').className = 'rval err';
@@ -129,7 +129,6 @@ async function runBenchmark() {
     const sigCount = customV1Val.signals ? Object.keys(customV1Val.signals).length : 0;
     el('custom-deterministic-signals').textContent = `${sigCount} signals collected`;
     el('custom-deterministic-signals').className = 'rval ok';
-    console.log('[Custom Deterministic] deterministicVisitorId:', customV1Val.deterministicVisitorId);
   } else {
     el('custom-deterministic-visitor').textContent = 'Error';
     el('custom-deterministic-visitor').className = 'rval err';
