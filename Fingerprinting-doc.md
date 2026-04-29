@@ -1,6 +1,4 @@
-Visitor ID System – Technical Documentation
-
-## 1. Core Goal
+## Visitor ID System – Technical Documentation
 
 > **Signals should be unique across sessions, but should NOT be unique across users.**
 
@@ -25,7 +23,7 @@ The system achieves this by treating signals as _evidence_, not as a checksum. I
 
 ---
 
-## 2. Why Not a Simple Hash?
+## 1. Why Not a Simple Hash?
 
 The naive approach is:
 
@@ -46,7 +44,7 @@ A hash-based ID would re-mint a new identity on almost every visit for users who
 
 ---
 
-## 3. Signals — What We Collect and Why
+## 2. Signals — What We Collect and Why
 
 Signals are grouped by how stable and spoofable they are.
 
@@ -123,7 +121,7 @@ Each media feature is its own signal with low individual weight. Collectively th
 
 ---
 
-## 4. Signal Weights — The Philosophy
+## 3. Signal Weights — The Philosophy
 
 Every signal is assigned a weight representing its contribution to the final similarity score. The values are **normalized at runtime** — the absolute values don't matter, only the ratios. This means adding a new low-weight signal never changes the effective weight of existing high-weight signals.
 
@@ -167,7 +165,7 @@ Example: Canvas Defender zeros out canvas2d (0.03 normalized ≈ 3%) and canvasP
 
 ---
 
-## 5. The 11 Hardened Keys — Why These, Not Others
+## 4. The 11 Hardened Keys — Why These, Not Others
 
 The `HARDENED_KEYS` list is used **only for minting a new visitor ID** (not for matching). When a first-time visitor arrives, we need to generate an ID that is:
 
@@ -226,7 +224,7 @@ The rule: a hardened signal must be essentially **immutable without a hardware c
 
 ---
 
-## 6. Why Fuzzy Matching?
+## 5. Why Fuzzy Matching?
 
 Instead of requiring signals to match exactly, we compute a **weighted similarity score** from 0.0 to 1.0 and accept a match if the score is above the threshold.
 
@@ -257,7 +255,7 @@ Weighted sum: **~0.89** → above threshold → **same visitor** ✓
 
 ---
 
-## 7. The Similarity Pipeline — Step by Step
+## 6. The Similarity Pipeline — Step by Step
 
 ```
                  ┌─────────────────────┐
@@ -301,7 +299,7 @@ If a signal returns `null` (unavailable on this browser), it is **dropped from b
 
 ---
 
-## 8. Per-Signal Similarity Functions
+## 7. Per-Signal Similarity Functions
 
 Rather than a single generic comparator, each signal has a purpose-built function:
 
@@ -325,7 +323,7 @@ Rather than a single generic comparator, each signal has a purpose-built functio
 
 ---
 
-## 9. The 0.75 Threshold — How It Was Chosen
+## 8. The 0.75 Threshold — How It Was Chosen
 
 `MATCH_THRESHOLD = 0.75` means: if 75% or more of the weighted evidence matches, we consider it the same visitor.
 
@@ -348,7 +346,7 @@ The maximum tolerable signal loss before a new ID is minted is **25%**. The high
 
 ---
 
-## 10. Visitor ID Minting — Determinism vs Stability
+## 9. Visitor ID Minting — Determinism vs Stability
 
 Two IDs are returned:
 
@@ -386,7 +384,7 @@ The `stableSerialize` function absorbs:
 
 ---
 
-## 11. Storage — What Lives in localStorage
+## 10. Storage — What Lives in localStorage
 
 **Key:** `visitor_profile_v0_by_adgeist`
 
