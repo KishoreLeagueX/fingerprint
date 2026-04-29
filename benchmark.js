@@ -17,19 +17,24 @@ const ossPromise = import('https://openfpcdn.io/fingerprintjs/v4')
   .then(FP => { setStatus('oss', 'Loaded ✓', 'ok'); return FP.load(); })
   .catch(err => { setStatus('oss', 'Failed: ' + err.message, 'err'); throw err; });
 
-// 3. Custom (fingerprint.js) — ES module, same pattern as Pro/OSS
-const customPromise = import('./components/identifier/v0/visitorid.js')
-  .then(FP => { setStatus('custom', 'Loaded ✓', 'ok'); return FP.load(); })
-  .catch(err => { setStatus('custom', 'Failed: ' + err.message, 'err'); throw err; });
+// 3. Custom v0 (Fuzzy Match) — ES module with weighted similarity
+const customV0Promise = import('./components/identifier/v0/visitorid.js')
+  .then(FP => { setStatus('custom-v0', 'Loaded ✓', 'ok'); return FP.load(); })
+  .catch(err => { setStatus('custom-v0', 'Failed: ' + err.message, 'err'); throw err; });
+
+// 4. Custom v1 (Simple Hash) — ES module, deterministic only
+const customV1Promise = import('./components/identifier/v1/visitorid.js')
+  .then(FP => { setStatus('custom-v1', 'Loaded ✓', 'ok'); return FP.load(); })
+  .catch(err => { setStatus('custom-v1', 'Failed: ' + err.message, 'err'); throw err; });
 
 // ---------------------------------------------------------------------------
 // PostHog: send fingerprint results on first load
 // ---------------------------------------------------------------------------
-function sendToPostHog(proVal, ossVal, customVal) {
+function sendToPostHog(proVal, ossVal, customV0Val, customV1Val) {
   if (typeof posthog === 'undefined') return;
 
-  // Use custom visitorId as the stable distinct_id; fall back to Pro → OSS
-  const distinctId = customVal?.visitorId || proVal?.visitorId || ossVal?.visitorId;
+  // Use custom v0 visitorId as the stable distinct_id; fall back to v1 → Pro → OSS
+  const distinctId = customV0Val?.visitorId || customV1Val?.visitorId || proVal?.visitorId || ossVal?.visitorId;
   if (distinctId) posthog.identify(distinctId);
 
   const properties = {
@@ -37,15 +42,22 @@ function sendToPostHog(proVal, ossVal, customVal) {
     publisher_name: 'https://www.adgeist.ai', 
     pro_visitor_id: proVal?.visitorId  ?? proVal?.visitor_id  ?? null,
     oss_visitor_id: ossVal?.visitorId ?? null,
-    adgeist_visitor_id: customVal?.visitorId ?? null,
+    custom_v0_visitor_id: customV0Val?.visitorId ?? null,
+    custom_v1_visitor_id: customV1Val?.visitorId ?? null,
 
-    adgeist_visitor_details :{
-        visitorId:    customVal.visitorId,
-        isNew:        customVal.isNew,
-        visits:       customVal.visits,
-        signals:      customVal.signals,
-        ...(customVal.similarityScore ? { similarityScore: customVal.similarityScore } : null)
-    }
+    custom_v0_details: customV0Val ? {
+        visitorId:    customV0Val.visitorId,
+        isNew:        customV0Val.isNew,
+        visits:       customV0Val.visits,
+        signals:      customV0Val.signals,
+        ...(customV0Val.similarityScore ? { similarityScore: customV0Val.similarityScore } : null)
+    } : null,
+
+    custom_v1_details: customV1Val ? {
+        visitorId:    customV1Val.visitorId,
+        version:      customV1Val.version,
+        signals:      customV1Val.signals
+    } : null
   };
 
   posthog.capture('fingerprinting', properties);
@@ -63,15 +75,17 @@ async function runBenchmark() {
     catch { return null; }
   }
 
-  const [proResult, ossResult, customResult] = await Promise.allSettled([
+  const [proResult, ossResult, customV0Result, customV1Result] = await Promise.allSettled([
     run(proPromise, fp => fp.get()),
     run(ossPromise, fp => fp.get()),
-    run(customPromise, agent => agent.get()),
+    run(customV0Promise, agent => agent.get()),
+    run(customV1Promise, agent => agent.get()),
   ]);
 
-  const proVal    = proResult.status    === 'fulfilled' ? proResult.value    : null;
-  const ossVal    = ossResult.status    === 'fulfilled' ? ossResult.value    : null;
-  const customVal = customResult.status === 'fulfilled' ? customResult.value : null;
+  const proVal      = proResult.status      === 'fulfilled' ? proResult.value      : null;
+  const ossVal      = ossResult.status      === 'fulfilled' ? ossResult.value      : null;
+  const customV0Val = customV0Result.status === 'fulfilled' ? customV0Result.value : null;
+  const customV1Val = customV1Result.status === 'fulfilled' ? customV1Result.value : null;
 
   // Display Pro
   if (proVal) {
@@ -98,28 +112,34 @@ async function runBenchmark() {
     el('oss-visitor').className = 'rval err';
   }
 
-  // Display Custom
-  if (customVal) {
-    el('custom-visitor').textContent = customVal.visitorId || '—';
-    el('custom-visitor').className = 'rval ok';
-    const sigCount = customVal.signals ? Object.keys(customVal.signals).length : 0;
-    el('custom-signals').textContent = `${sigCount} signals collected`;
-    el('custom-signals').className = 'rval ok';
-    if (customVal.debug) {
-      const pct = customVal.debug.scorePercent;
-      el('custom-score').textContent = pct !== null
-        ? `${pct}% match (threshold ${customVal.debug.thresholdPercent}%) — ${customVal.debug.matched ? 'MATCHED ✓' : 'NEW visitor'}`
-        : 'First visit — no prior profile';
-      el('custom-score').className = 'rval ok';
-    }
-    // console.log('[Custom] Result:', customVal);
+  // Display Custom v0
+  if (customV0Val) {
+    el('custom-v0-visitor').textContent = customV0Val.visitorId || '—';
+    el('custom-v0-visitor').className = 'rval ok';
+    const sigCount = customV0Val.signals ? Object.keys(customV0Val.signals).length : 0;
+    el('custom-v0-signals').textContent = `${sigCount} signals collected`;
+    el('custom-v0-signals').className = 'rval ok';
+    console.log('[Custom v0] Result:', customV0Val);
   } else {
-    el('custom-visitor').textContent = 'Error';
-    el('custom-visitor').className = 'rval err';
+    el('custom-v0-visitor').textContent = 'Error';
+    el('custom-v0-visitor').className = 'rval err';
+  }
+
+  // Display Custom v1
+  if (customV1Val) {
+    el('custom-v1-visitor').textContent = customV1Val.visitorId || '—';
+    el('custom-v1-visitor').className = 'rval ok';
+    const sigCount = customV1Val.signals ? Object.keys(customV1Val.signals).length : 0;
+    el('custom-v1-signals').textContent = `${sigCount} signals collected`;
+    el('custom-v1-signals').className = 'rval ok';
+    console.log('[Custom v1] Result:', customV1Val);
+  } else {
+    el('custom-v1-visitor').textContent = 'Error';
+    el('custom-v1-visitor').className = 'rval err';
   }
 
   // Send to PostHog
-  sendToPostHog(proVal, ossVal, customVal);
+  // sendToPostHog(proVal, ossVal, customV0Val, customV1Val);
 
   runBtn.textContent = 'Run Again';
   runBtn.disabled = false;
@@ -129,7 +149,7 @@ async function runBenchmark() {
 // ---------------------------------------------------------------------------
 // Auto-run on load once SDKs settle; button re-runs manually
 // ---------------------------------------------------------------------------
-Promise.allSettled([proPromise, ossPromise, customPromise]).then(results => {
+Promise.allSettled([proPromise, ossPromise, customV0Promise, customV1Promise]).then(results => {
   if (results.some(r => r.status === 'fulfilled')) {
     runBenchmark(); // auto-run → also fires PostHog
   } else {
