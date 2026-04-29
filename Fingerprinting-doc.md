@@ -1,10 +1,8 @@
-## Visitor ID System – Technical Documentation
+## Visitor ID System
 
 > **Signals should be unique across sessions, but should NOT be unique across users.**
 
 This is the central principle that governs every design decision in this system.
-
-### What it means
 
 A traditional hash-based fingerprint tries to be maximally unique — it combines every available signal into a single value and hopes it never changes. This breaks the moment _anything_ changes (browser update, incognito mode, a user resizing a window, an anti-fingerprint extension randomising canvas output).
 
