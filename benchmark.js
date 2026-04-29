@@ -17,24 +17,27 @@ const ossPromise = import('https://openfpcdn.io/fingerprintjs/v4')
   .then(FP => { setStatus('oss', 'Loaded ✓', 'ok'); return FP.load(); })
   .catch(err => { setStatus('oss', 'Failed: ' + err.message, 'err'); throw err; });
 
-// 3. Custom v0 (Fuzzy Match) — ES module with weighted similarity
-const customV0Promise = import('./components/identifier/v0/visitorid.js')
-  .then(FP => { setStatus('custom-v0', 'Loaded ✓', 'ok'); return FP.load(); })
-  .catch(err => { setStatus('custom-v0', 'Failed: ' + err.message, 'err'); throw err; });
-
-// 4. Custom v1 (Simple Hash) — ES module, deterministic only
+// 3. Custom v1 — ES module with both fuzzy match and deterministic IDs
 const customV1Promise = import('./components/identifier/v1/visitorid.js')
-  .then(FP => { setStatus('custom-v1', 'Loaded ✓', 'ok'); return FP.load(); })
-  .catch(err => { setStatus('custom-v1', 'Failed: ' + err.message, 'err'); throw err; });
+  .then(FP => { 
+    setStatus('custom-fuzzy', 'Loaded ✓', 'ok');
+    setStatus('custom-deterministic', 'Loaded ✓', 'ok');
+    return FP.load();
+  })
+  .catch(err => { 
+    setStatus('custom-fuzzy', 'Failed: ' + err.message, 'err');
+    setStatus('custom-deterministic', 'Failed: ' + err.message, 'err');
+    throw err;
+  });
 
 // ---------------------------------------------------------------------------
 // PostHog: send fingerprint results on first load
 // ---------------------------------------------------------------------------
-function sendToPostHog(proVal, ossVal, customV0Val, customV1Val) {
+function sendToPostHog(proVal, ossVal, customV1Val) {
   if (typeof posthog === 'undefined') return;
 
-  // Use custom v0 visitorId as the stable distinct_id; fall back to v1 → Pro → OSS
-  const distinctId = customV0Val?.visitorId || customV1Val?.visitorId || proVal?.visitorId || ossVal?.visitorId;
+  // Use custom v1 visitorId as the stable distinct_id; fall back to Pro → OSS
+  const distinctId = customV1Val?.visitorId || proVal?.visitorId || ossVal?.visitorId;
   if (distinctId) posthog.identify(distinctId);
 
   const properties = {
@@ -42,21 +45,17 @@ function sendToPostHog(proVal, ossVal, customV0Val, customV1Val) {
     publisher_name: 'https://www.adgeist.ai', 
     pro_visitor_id: proVal?.visitorId  ?? proVal?.visitor_id  ?? null,
     oss_visitor_id: ossVal?.visitorId ?? null,
-    custom_v0_visitor_id: customV0Val?.visitorId ?? null,
-    custom_v1_visitor_id: customV1Val?.visitorId ?? null,
-
-    custom_v0_details: customV0Val ? {
-        visitorId:    customV0Val.visitorId,
-        isNew:        customV0Val.isNew,
-        visits:       customV0Val.visits,
-        signals:      customV0Val.signals,
-        ...(customV0Val.similarityScore ? { similarityScore: customV0Val.similarityScore } : null)
-    } : null,
+    custom_fuzzy_visitor_id: customV1Val?.visitorId ?? null,
+    custom_deterministic_visitor_id: customV1Val?.deterministicVisitorId ?? null,
 
     custom_v1_details: customV1Val ? {
-        visitorId:    customV1Val.visitorId,
-        version:      customV1Val.version,
-        signals:      customV1Val.signals
+        visitorId:             customV1Val.visitorId,
+        deterministicVisitorId: customV1Val.deterministicVisitorId,
+        isNew:                 customV1Val.isNew,
+        visits:                customV1Val.visits,
+        version:               customV1Val.version,
+        signals:               customV1Val.signals,
+        ...(customV1Val.similarityScore ? { similarityScore: customV1Val.similarityScore } : null)
     } : null
   };
 
@@ -75,16 +74,14 @@ async function runBenchmark() {
     catch { return null; }
   }
 
-  const [proResult, ossResult, customV0Result, customV1Result] = await Promise.allSettled([
+  const [proResult, ossResult, customV1Result] = await Promise.allSettled([
     run(proPromise, fp => fp.get()),
     run(ossPromise, fp => fp.get()),
-    run(customV0Promise, agent => agent.get()),
     run(customV1Promise, agent => agent.get()),
   ]);
 
   const proVal      = proResult.status      === 'fulfilled' ? proResult.value      : null;
   const ossVal      = ossResult.status      === 'fulfilled' ? ossResult.value      : null;
-  const customV0Val = customV0Result.status === 'fulfilled' ? customV0Result.value : null;
   const customV1Val = customV1Result.status === 'fulfilled' ? customV1Result.value : null;
 
   // Display Pro
@@ -112,34 +109,34 @@ async function runBenchmark() {
     el('oss-visitor').className = 'rval err';
   }
 
-  // Display Custom v0
-  if (customV0Val) {
-    el('custom-v0-visitor').textContent = customV0Val.visitorId || '—';
-    el('custom-v0-visitor').className = 'rval ok';
-    const sigCount = customV0Val.signals ? Object.keys(customV0Val.signals).length : 0;
-    el('custom-v0-signals').textContent = `${sigCount} signals collected`;
-    el('custom-v0-signals').className = 'rval ok';
-    console.log('[Custom v0] Result:', customV0Val);
+  // Display Custom Fuzzy Match (visitorId from v1)
+  if (customV1Val) {
+    el('custom-fuzzy-visitor').textContent = customV1Val.visitorId || '—';
+    el('custom-fuzzy-visitor').className = 'rval ok';
+    const sigCount = customV1Val.signals ? Object.keys(customV1Val.signals).length : 0;
+    el('custom-fuzzy-signals').textContent = `${sigCount} signals collected`;
+    el('custom-fuzzy-signals').className = 'rval ok';
+    console.log('[Custom Fuzzy Match] visitorId:', customV1Val.visitorId);
   } else {
-    el('custom-v0-visitor').textContent = 'Error';
-    el('custom-v0-visitor').className = 'rval err';
+    el('custom-fuzzy-visitor').textContent = 'Error';
+    el('custom-fuzzy-visitor').className = 'rval err';
   }
 
-  // Display Custom v1
+  // Display Custom Deterministic (deterministicVisitorId from v1)
   if (customV1Val) {
-    el('custom-v1-visitor').textContent = customV1Val.visitorId || '—';
-    el('custom-v1-visitor').className = 'rval ok';
+    el('custom-deterministic-visitor').textContent = customV1Val.deterministicVisitorId || '—';
+    el('custom-deterministic-visitor').className = 'rval ok';
     const sigCount = customV1Val.signals ? Object.keys(customV1Val.signals).length : 0;
-    el('custom-v1-signals').textContent = `${sigCount} signals collected`;
-    el('custom-v1-signals').className = 'rval ok';
-    console.log('[Custom v1] Result:', customV1Val);
+    el('custom-deterministic-signals').textContent = `${sigCount} signals collected`;
+    el('custom-deterministic-signals').className = 'rval ok';
+    console.log('[Custom Deterministic] deterministicVisitorId:', customV1Val.deterministicVisitorId);
   } else {
-    el('custom-v1-visitor').textContent = 'Error';
-    el('custom-v1-visitor').className = 'rval err';
+    el('custom-deterministic-visitor').textContent = 'Error';
+    el('custom-deterministic-visitor').className = 'rval err';
   }
 
   // Send to PostHog
-  // sendToPostHog(proVal, ossVal, customV0Val, customV1Val);
+  // sendToPostHog(proVal, ossVal, customV1Val);
 
   runBtn.textContent = 'Run Again';
   runBtn.disabled = false;
@@ -149,7 +146,7 @@ async function runBenchmark() {
 // ---------------------------------------------------------------------------
 // Auto-run on load once SDKs settle; button re-runs manually
 // ---------------------------------------------------------------------------
-Promise.allSettled([proPromise, ossPromise, customV0Promise, customV1Promise]).then(results => {
+Promise.allSettled([proPromise, ossPromise, customV1Promise]).then(results => {
   if (results.some(r => r.status === 'fulfilled')) {
     runBenchmark(); // auto-run → also fires PostHog
   } else {

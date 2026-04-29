@@ -1,8 +1,5 @@
 /**
- * Unique Identifier v1.0.0 - Copyright (c) thealteroffice, Inc, 2026 (https://www.thealteroffice.com)
- * 
- * Simplified version: Always generates fresh visitor ID from hardened signals
- * No profile storage, no weighted similarity matching
+ * Unique Identifier v0.0.1 - Copyright (c) thealteroffice, Inc, 2026 (https://www.thealteroffice.com)
  */
 
 
@@ -174,13 +171,398 @@ const _WEBGL_EXT_PARAMS = new Set([
 
 
 // ===========================================================================
-// VISITOR ID — Simple Hash-Based Generation (No Fuzzy Matching)
+// VISITOR ID — Fuzzy Weighted Similarity
 // ===========================================================================
 
 /**
- * Hardened signal keys — hardware-level signals that cannot be spoofed.
- * Used to mint visitor IDs deterministically.
+ * Signal weights — must sum to 1.0.
+ *
+ * Weighting philosophy:
+ *   HIGH  — signals rooted in physical hardware (CPU, GPU, audio DSP, OS fonts)
+ *           → impossible for extensions to intercept or fake convincingly
+ *   LOW   — signals known to be intercepted by anti-fingerprint tools
+ *           (canvas, canvasPrng) → still contribute, but can't kill the ID alone
+ *   ZERO  — volatile signals excluded entirely (PRNG entropy, timer precision,
+ *           connection rtt, online status, perf time origin, ad blocker result)
  */
+const SIGNAL_WEIGHTS = {
+  // ── Hardware-level (impossible to fake) ────────────────────────────
+  audioFingerprint:     0.12,   // OfflineAudioContext DSP — hardware specific
+  mathFingerprint:      0.10,   // CPU FPU trig precision — V8/SpiderMonkey/JSC differ
+  float32NanByte:       0.03,   // CPU byte-order of IEEE 754 NaN
+  // ── GPU / WebGL ─────────────────────────────────────────────────────
+  webGL:                0.06,   // GPU renderer string
+  webGLExtensions:      0.06,   // full WebGL params + extension params
+  webGLCanvas:          0.05,   // rendered scene pixel hash
+  // ── OS installed software ───────────────────────────────────────────
+  fonts:                0.09,   // installed font set (Jaccard similarity)
+  fontPreferences:      0.04,   // 7 font-stack widths — OS text rendering
+  speechVoices:         0.03,   // OS TTS voices
+  // ── Browser engine identity ─────────────────────────────────────────
+  evalLength:           0.04,   // eval.toString().length differs by engine
+  errorStackFormat:     0.03,   // "v8" / "spidermonkey" / "jsc"
+  wasmFeatures:         0.04,   // SIMD / bulk-memory etc.
+  sourceBufferTypes:    0.02,   // typeof SourceBuffer per engine
+  // ── Screen / Display ────────────────────────────────────────────────
+  screenInfo:           0.04,   // resolution + colorDepth + DPR
+  screenFrame:          0.03,   // window insets (notch / taskbar)
+  hardwareInfo:         0.04,   // CPU cores + device memory
+  // ── Canvas (low weight — Canvas Defender randomises) ─────────────────
+  canvas2d:             0.03,   // raw text + geometry dataURLs
+  canvasPrng:           0.02,   // seeded pixel hash
+  // ── OS / Locale preferences ─────────────────────────────────────────
+  timezone:             0.05,
+  languages:            0.03,
+  intlLocale:           0.02,
+  platform:             0.03,
+  // ── CSS Media Features (individual) ─────────────────────────────────
+  colorGamut:           0.02,
+  contrast:             0.02,
+  reducedMotion:        0.01,
+  hdr:                  0.01,
+  invertedColors:       0.01,
+  forcedColors:         0.01,
+  monochrome:           0.01,
+  // ── Navigator / Browser config ──────────────────────────────────────
+  vendorInfo:           0.02,   // vendor string + flavors
+  plugins:              0.02,   // installed plugins (Jaccard similarity on names)
+  mimeTypesCount:       0.01,
+  mediaFeatures:        0.01,   // legacy merged object (kept for compat)
+  touchSupport:         0.01,
+  navigatorFunctionNames: 0.01,
+  // ── CSS ─────────────────────────────────────────────────
+  cssFeatures:          0.01,   // CSS property support detection
+  // ── UnCategorized ────────────────────────────────────────────
+  incognito:            0.04,   // private browsing detection
+  reducedTransparency:  0.01,
+  hoverNone:            0.01,   // touch vs mouse primary input
+  anyHoverNone:         0.01,
+  pointerCoarse:        0.01,   // input pointer type
+  anyPointerCoarse:     0.01,
+  storageEstimate:      0.02,   // quota size fingerprint
+  permissions:          0.02,   // camera/mic/geo permission states
+  rtcPeerConnection:    0.03,   // local subnet IP (very stable)
+  mediaDevices:         0.02,   // device count
+  browserScaleFactor:   0.01,
+  apiAvailability:      0.02,   // 15 API presence flags
+};
+// Weights are normalized at runtime → changing individual values is safe
+
+// ---------------------------------------------------------------------------
+// SIGNAL SIMILARITY FUNCTIONS
+// Each returns a score in [0.0 … 1.0]
+// ---------------------------------------------------------------------------
+
+/** Jaccard similarity for two flat arrays treated as sets */
+function jaccardSimilarity(a, b) {
+  const setA = new Set(a), setB = new Set(b);
+  let inter = 0;
+  for (const x of setA) if (setB.has(x)) inter++;
+  const union = setA.size + setB.size - inter;
+  return union > 0 ? inter / union : 1.0;
+}
+
+/** Per-key average match for plain objects — each key is either exact-match or not */
+function objectKeySimilarity(current, stored) {
+  const keys = Object.keys(stored).filter(k => k in current);
+  if (!keys.length) return 0;
+  const matches = keys.filter(k => current[k] === stored[k]).length;
+  return matches / keys.length;
+}
+
+/**
+ * Dispatch table — one function per signal key.
+ * Returns 0–1 score comparing current vs stored value.
+ */
+function computeSignalSimilarity(key, current, stored) {
+  if (current === null || current === undefined) return null;
+  if (stored  === null || stored  === undefined) return null;
+
+  switch (key) {
+
+    // ── Number signals with tight tolerance ───────────────────────────
+    case 'audioFingerprint': {
+      if (typeof current !== 'number' || typeof stored !== 'number') return 0;
+      // Negative = error code: must match exactly
+      if (current < 0 || stored < 0) return current === stored ? 1 : 0;
+      const pct = Math.abs(current - stored) / (Math.abs(stored) + 1e-10);
+      // < 0.01% difference → same hardware; DSPs don't drift
+      return pct < 0.0001 ? 1.0 : pct < 0.005 ? 0.6 : 0;
+    }
+
+    case 'evalLength':
+    case 'float32NanByte':
+    case 'mimeTypesCount':
+      return current === stored ? 1.0 : 0;
+
+    // ── Plugins: Jaccard similarity over plugin names ──────────────────
+    case 'plugins': {
+      if (!Array.isArray(current) || !Array.isArray(stored)) return 0;
+      const namesC = current.map(p => p && p.name).filter(Boolean);
+      const namesS = stored.map(p => p && p.name).filter(Boolean);
+      return jaccardSimilarity(namesC, namesS);
+    }
+
+    // ── String/enum exact match ────────────────────────────────────────
+    case 'errorStackFormat':
+    case 'intlLocale':
+    case 'timezone':
+    case 'platform':
+    case 'webGLCanvas':
+    case 'canvasPrng':
+    case 'navigatorFunctionNames':
+    case 'colorGamut':
+    case 'contrast':
+    case 'reducedMotion':
+    case 'hdr':
+    case 'invertedColors':
+    case 'forcedColors':
+    case 'monochrome':
+    case 'screenFrame':
+    case 'privateClickMeasurement':
+      return current === stored ? 1.0 : 0;
+
+    // ── Math fingerprint: object of floats, key-by-key comparison ─────
+    case 'mathFingerprint': {
+      if (typeof current !== 'object' || typeof stored !== 'object') return 0;
+      const keys = Object.keys(stored).filter(k => k in current);
+      if (!keys.length) return 0;
+      let matches = 0;
+      for (const k of keys) {
+        const cv = current[k], sv = stored[k];
+        if (typeof cv !== 'number' || typeof sv !== 'number') continue;
+        // FPU trig results are deterministic — must match exactly
+        const pct = Math.abs(cv - sv) / (Math.abs(sv) + 1e-20);
+        if (pct < 1e-10) matches++;
+      }
+      return matches / keys.length;
+    }
+
+    // ── WebGL: GPU renderer strings are the most stable part ──────────
+    case 'webGL': {
+      if (typeof current !== 'object' || typeof stored !== 'object') return 0;
+      let score = 0, total = 0;
+      // Renderer unmasked = strongest GPU signal
+      for (const f of ['rendererUnmasked', 'vendorUnmasked', 'renderer', 'vendor', 'version']) {
+        if (current[f] !== undefined && stored[f] !== undefined) {
+          score += current[f] === stored[f] ? 1 : 0;
+          total++;
+        }
+      }
+      return total > 0 ? score / total : 0;
+    }
+
+    // ── WebGL extensions: compare supported extension set ─────────────
+    case 'webGLExtensions': {
+      if (typeof current !== 'object' || typeof stored !== 'object') return 0;
+      // Compare extension list (Jaccard) + a sample of parameters
+      let score = 0, parts = 0;
+      if (Array.isArray(current.extensions) && Array.isArray(stored.extensions)) {
+        score += jaccardSimilarity(current.extensions, stored.extensions);
+        parts++;
+      }
+      if (Array.isArray(current.unsupportedExtensions) && Array.isArray(stored.unsupportedExtensions)) {
+        score += jaccardSimilarity(current.unsupportedExtensions, stored.unsupportedExtensions);
+        parts++;
+      }
+      if (typeof current.parameters === 'object' && typeof stored.parameters === 'object') {
+        score += objectKeySimilarity(current.parameters, stored.parameters);
+        parts++;
+      }
+      return parts > 0 ? score / parts : 0;
+    }
+
+    // ── Canvas 2D: raw dataURL comparison (or legacy hash compat) ──────
+    case 'canvas2d': {
+      if (typeof current !== 'object' || typeof stored !== 'object') return 0;
+      const winding = (current.winding === stored.winding) ? 1 : 0;
+      // Support both raw dataURL and legacy textHash/geometryHash
+      const textM = current.text !== undefined
+        ? (current.text === stored.text ? 1 : 0)
+        : (current.textHash === stored.textHash ? 1 : 0);
+      const geoM  = current.geometry !== undefined
+        ? (current.geometry === stored.geometry ? 1 : 0)
+        : (current.geometryHash === stored.geometryHash ? 1 : 0);
+      return (winding + textM + geoM) / 3;
+    }
+
+    // ── Fonts: Jaccard over installed font names ───────────────────────
+    case 'fonts': {
+      if (!Array.isArray(current) || !Array.isArray(stored)) return 0;
+      return jaccardSimilarity(current, stored);
+    }
+
+    // ── Font preferences: compare per-stack widths (within 1px tolerance) ─
+    case 'fontPreferences': {
+      if (typeof current !== 'object' || typeof stored !== 'object') return 0;
+      const keys = Object.keys(stored).filter(k => k in current);
+      if (!keys.length) return 0;
+      const matches = keys.filter(k => Math.abs(current[k] - stored[k]) < 1).length;
+      return matches / keys.length;
+    }
+
+    // ── Speech voices: Jaccard over voice names ────────────────────────
+    case 'speechVoices': {
+      if (!Array.isArray(current) || !Array.isArray(stored)) return 0;
+      const namesC = current.map(v => v && v.name).filter(Boolean);
+      const namesS = stored.map(v => v && v.name).filter(Boolean);
+      return jaccardSimilarity(namesC, namesS);
+    }
+
+    // ── Screen: resolution array + colorDepth + DPR ───────────────────
+    case 'screenInfo': {
+      if (typeof current !== 'object' || typeof stored !== 'object') return 0;
+      let score = 0, total = 0;
+      // resolution is [larger, smaller]
+      if (Array.isArray(current.resolution) && Array.isArray(stored.resolution)) {
+        score += (current.resolution[0] === stored.resolution[0] &&
+                  current.resolution[1] === stored.resolution[1]) ? 1 : 0;
+        total++;
+      } else {
+        // Legacy flat format compat
+        for (const f of ['width', 'height']) {
+          if (f in current && f in stored) { score += current[f] === stored[f] ? 1 : 0; total++; }
+        }
+      }
+      for (const f of ['colorDepth', 'devicePixelRatio']) {
+        if (f in current && f in stored) { score += current[f] === stored[f] ? 1 : 0; total++; }
+      }
+      return total > 0 ? score / total : 0;
+    }
+
+    // ── Hardware: concurrency + memory ────────────────────────────────
+    case 'hardwareInfo': {
+      if (typeof current !== 'object' || typeof stored !== 'object') return 0;
+      const concMatch = current.hardwareConcurrency === stored.hardwareConcurrency ? 1 : 0;
+      const memMatch  = current.deviceMemory         === stored.deviceMemory         ? 1 : 0;
+      return (concMatch + memMatch) / 2;
+    }
+
+    // ── Languages: flatten nested arrays, Jaccard ─────────────────────
+    case 'languages': {
+      const flatC = [].concat(...(Array.isArray(current) ? current : [current]));
+      const flatS = [].concat(...(Array.isArray(stored)  ? stored  : [stored]));
+      return jaccardSimilarity(flatC, flatS);
+    }
+
+    // ── Vendor: vendor string + flavors array ─────────────────────────
+    case 'vendorInfo': {
+      if (typeof current !== 'object' || typeof stored !== 'object') return 0;
+      const vendorMatch = current.vendor === stored.vendor ? 1 : 0;
+      const flavorsMatch = jaccardSimilarity(current.flavors || [], stored.flavors || []);
+      return (vendorMatch + flavorsMatch) / 2;
+    }
+
+    // ── WasmFeatures: object of booleans ──────────────────────────────
+    case 'wasmFeatures':
+    case 'sourceBufferTypes':
+      if (typeof current !== typeof stored) return 0;
+      if (typeof current === 'object' && current !== null) return objectKeySimilarity(current, stored);
+      return current === stored ? 1.0 : 0;
+
+    // ── Touch support: multi-field ────────────────────────────────────
+    case 'touchSupport': {
+      if (typeof current !== 'object' || typeof stored !== 'object') return 0;
+      const fields = ['maxTouchPoints', 'touchEvent', 'touchStart'];
+      const matches = fields.filter(f => current[f] === stored[f]).length;
+      return matches / fields.length;
+    }
+
+    // ── Media features: prefer-color-scheme, colorGamut, etc. ─────────
+    case 'mediaFeatures':
+    case 'cssFeatures': {
+      if (typeof current !== 'object' || typeof stored !== 'object') return 0;
+      return objectKeySimilarity(current, stored);
+    }
+
+
+    // ── Extended/Pro: most are simple exact/Jaccard matches ──────────────
+    case 'incognito':
+    case 'reducedTransparency':
+    case 'hoverNone':
+    case 'anyHoverNone':
+    case 'pointerCoarse':
+    case 'anyPointerCoarse':
+    case 'browserScaleFactor':
+      return current === stored ? 1.0 : 0;
+
+    case 'storageEstimate': {
+      if (typeof current !== 'object' || typeof stored !== 'object') return 0;
+      // quota changes in private vs normal — exact match
+      return current.quota === stored.quota && current.persisted === stored.persisted ? 1.0 : 0.5;
+    }
+
+    case 'permissions': {
+      if (typeof current !== 'object' || typeof stored !== 'object') return 0;
+      return objectKeySimilarity(current, stored);
+    }
+
+    case 'rtcPeerConnection': {
+      if (!Array.isArray(current) || !Array.isArray(stored)) return 0;
+      return jaccardSimilarity(current, stored);
+    }
+
+    case 'mediaDevices': {
+      if (typeof current !== 'object' || typeof stored !== 'object') return 0;
+      return objectKeySimilarity(current, stored);
+    }
+
+    case 'apiAvailability': {
+      if (typeof current !== 'object' || typeof stored !== 'object') return 0;
+      return objectKeySimilarity(current, stored);
+    }
+
+    default:
+      // Generic fallback: exact equality
+      try {
+        return JSON.stringify(current) === JSON.stringify(stored) ? 1.0 : 0;
+      } catch (_) {
+        return current === stored ? 1.0 : 0;
+      }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// CORE: Compute weighted similarity score
+// ---------------------------------------------------------------------------
+
+/**
+ * Compares current signals against a stored profile.
+ * Returns { score, breakdown } where score is 0.0–1.0.
+ */
+function computeSimilarityScore(currentSignals, storedSignals) {
+  let weightedSum = 0;
+  let totalWeight = 0;
+  const breakdown = {};
+
+  // Normalize weights so they always sum to 1.0 regardless of which signals succeeded
+  const weightEntries = Object.entries(SIGNAL_WEIGHTS);
+  const rawTotal = weightEntries.reduce((s, [, w]) => s + w, 0);
+
+  for (const [key, rawWeight] of weightEntries) {
+    const weight = rawWeight / rawTotal;
+    const simScore = computeSignalSimilarity(key, currentSignals[key], storedSignals[key]);
+
+    if (simScore === null) {
+      // Signal unavailable on this browser — skip, re-normalize
+      breakdown[key] = { score: null, weight, status: 'unavailable', oldValue: storedSignals[key] ?? null, newValue: currentSignals[key] ?? null };
+      continue;
+    }
+
+    weightedSum  += simScore * weight;
+    totalWeight  += weight;
+    breakdown[key] = { score: simScore, weight, contribution: simScore * weight, oldValue: storedSignals[key] ?? null, newValue: currentSignals[key] ?? null };
+  }
+
+  const finalScore = totalWeight > 0 ? weightedSum / totalWeight : 0;
+  return { score: finalScore, breakdown };
+}
+
+// ---------------------------------------------------------------------------
+// SEED: Hash of hardened (un-spoofable) signals — used only to mint new IDs
+// ---------------------------------------------------------------------------
+
+/** Signals that no extension can intercept or randomize — used for ID seeding */
 const HARDENED_KEYS = [
   'audioFingerprint', 'mathFingerprint', 'float32NanByte',
   'evalLength', 'errorStackFormat', 'wasmFeatures',
@@ -228,35 +610,106 @@ async function mintVisitorId(signals) {
 }
 
 // ---------------------------------------------------------------------------
-// MAIN: generateVisitorId — Always creates fresh ID from signals
+// MAIN: matchOrCreateVisitor — the full fuzzy pipeline
 // ---------------------------------------------------------------------------
 
-// Module-level state
+const FP_STORAGE_KEY   = 'visitor_profile_v0_by_adgeist';
+const MATCH_THRESHOLD  = 0.75;   // ≥75% weighted similarity → same visitor
+const PROFILE_VERSION  = 1;
+
+// Module-level state (avoids window pollution; works in both module and script context)
+let _similarityScore = null;
 let _enableLogs = false;
 
 /**
- * Simple visitor ID generation:
- * 
- *  1. Collect all signals
- *  2. Mint ID from hardened signals
- *  3. Return ID (no storage, no state)
- * 
- * This version does NOT:
- *  - Store profiles in localStorage
- *  - Compare against previous visits
- *  - Use weighted similarity matching
- *  - Track visit counts (always undefined - no persistence)
- *  - Determine if visitor is new or returning (always undefined - no history)
+ * Full fuzzy-matching visitor ID pipeline:
+ *
+ *  First visit:
+ *    collect signals → mint ID from hardened signals → store profile → return ID
+ *
+ *  Return visit:
+ *    collect signals → load stored profile → compute 0–1 similarity score
+ *      ≥ 0.75  → SAME visitor → refresh profile → return stored ID
+ *      < 0.75  → profile too different → mint new ID → overwrite profile
+ *
+ * Canvas Defender example:
+ *    canvas2d similarity = 0.33 (only winding matches, hashes differ)
+ *    canvas2d weight     = 0.04
+ *    contribution loss   = 0.04 × (1 - 0.33) = 0.027
+ *    All other 25 signals match perfectly → score ≈ 0.97 → same visitor ✓
  */
-async function generateVisitorId(signals) {
-  const visitorId = await mintVisitorId(signals);
-  
-  if (_enableLogs) {
-    console.log(`%c[SimpleHash] Generated visitorId: ${visitorId}`,
-                'color:#4361ee;font-weight:bold');
+async function matchOrCreateVisitor(signals) {
+  // ---------- Try to load existing profile ----------
+  let stored = null;
+  try {
+    const raw = localStorage.getItem(FP_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && parsed.version === PROFILE_VERSION) stored = parsed;
+    }
+  } catch (_) {}
+
+  // ---------- Compare against stored profile ----------
+  if (stored) {
+    const { score, breakdown } = computeSimilarityScore(signals, stored.signals);
+    const pct = (score * 100).toFixed(1);
+
+    _similarityScore = {
+      score,
+      threshold: MATCH_THRESHOLD,
+      matched: score >= MATCH_THRESHOLD,
+      randomisedSignalBreakdown: Object.entries(breakdown).map(([key, v]) => ({
+          signal:              key,
+          weight:              SIGNAL_WEIGHTS[key] ?? 0,                                          // configured weight (e.g. 0.12)
+          weightPercent:       parseFloat((v.weight * 100).toFixed(2)),                           // weight as % (e.g. 12.0)
+          similarityPercent:   v.score !== null ? parseFloat((v.score * 100).toFixed(1)) : 0,     // similarity % (e.g. 100.0)
+          contributionPercent: v.contribution != null ? parseFloat((v.contribution * 100).toFixed(3)) : 0, // weighted contribution % points
+          status:              v.status ?? 'success',
+          values:              { old: v.oldValue, new: v.newValue },
+        })).sort((a, b) => a.similarityPercent - b.similarityPercent)
+        .filter(v => v.similarityPercent !== 100)
+    };
+
+    if (score >= MATCH_THRESHOLD) {
+      // Same visitor — update profile signals with latest readings
+      stored.signals   = extractProfileSignals(signals);
+      stored.lastSeen  = Date.now();
+      stored.visits    = (stored.visits || 1) + 1;
+      try { localStorage.setItem(FP_STORAGE_KEY, JSON.stringify(stored)); } catch (_) {}
+
+      if (_enableLogs) console.log(`%c[FuzzyMatch] MATCH (${pct}%) → visitorId: ${stored.visitorId}`,
+                  'color:#27ae60;font-weight:bold');
+      return { visitorId: stored.visitorId, isNew: false, visits: stored.visits };
+    }
+
+    if (_enableLogs) console.warn(`[FuzzyMatch] NO MATCH (${pct}%) — creating new profile`);
   }
 
-  return { visitorId };
+  // ---------- New visitor or profile too different → mint fresh ID ----------
+  const visitorId = await mintVisitorId(signals);
+  const profile = {
+    version:   PROFILE_VERSION,
+    visitorId,
+    signals:   extractProfileSignals(signals),
+    firstSeen: Date.now(),
+    lastSeen:  Date.now(),
+    visits:    1,
+  };
+  try { localStorage.setItem(FP_STORAGE_KEY, JSON.stringify(profile)); } catch (_) {}
+
+  if (_enableLogs) console.log(`%c[FuzzyMatch] NEW visitor → visitorId: ${visitorId}`,
+              'color:#4361ee;font-weight:bold');
+
+  return { visitorId, isNew: true, visits: 1 };
+}
+
+/** Extract only the signals relevant to matching (keeps localStorage lean) */
+function extractProfileSignals(signals) {
+  const out = {};
+  for (const key of Object.keys(SIGNAL_WEIGHTS)) {
+    if (signals[key] !== undefined) out[key] = signals[key];
+  }
+  return out;
 }
 
 /** Wrap a signal collector: logs label + value, returns { label, value } */
@@ -1741,7 +2194,7 @@ function collectAutomationGlobals() {
     const detected = {};
     for (const [name, keys] of Object.entries(checks)) {
       detected[name] = keys.some(k => {
-        try { return k in window; } catch (_) { return false; }
+        try { return k in window && window[k] !== undefined; } catch (_) { return false; }
       });
     }
     // document-level checks
@@ -1804,15 +2257,19 @@ async function collectIncognito() {
       const sm = navigator.storage;
       if (sm && typeof sm.estimate === 'function') {
         const est = await sm.estimate();
-        if (est.quota && est.quota < 120000000) return true;
+        if (typeof est.quota === 'number') {
+          if (est.quota < 130 * 1024 * 1024) return true;  // <130 MB → private
+          return false;
+        }
       }
     } catch (_) {}
     // Safari private: requestFileSystem is disabled outright
     try {
       const fs = window.RequestFileSystem || window.webkitRequestFileSystem;
       if (fs) {
-        await new Promise((res, rej) => fs(0, 0, res, rej));
-        return false;
+        return await new Promise(resolve => {
+          fs(window.TEMPORARY || 0, 1, () => resolve(false), () => resolve(true));
+        });
       }
     } catch (_) {}
     return undefined;
@@ -1834,8 +2291,8 @@ function collectReducedTransparency() {
 function collectHoverNone() {
   return collectSignal('hoverNone', () => {
     try {
-      if (window.matchMedia('(hover: none)').matches)  return true;    // touch-primary
-      if (window.matchMedia('(hover: hover)').matches) return false;   // mouse-primary
+      if (window.matchMedia('(hover: none)').matches)  return true;   // touch-primary
+      if (window.matchMedia('(hover: hover)').matches) return false;  // mouse-primary
     } catch (_) {}
     return undefined;
   });
@@ -1856,9 +2313,9 @@ function collectAnyHoverNone() {
 function collectPointerCoarse() {
   return collectSignal('pointerCoarse', () => {
     try {
-      if (window.matchMedia('(pointer: coarse)').matches) return true;
-      if (window.matchMedia('(pointer: fine)').matches)   return false;
-      if (window.matchMedia('(pointer: none)').matches)   return null;
+      if (window.matchMedia('(pointer: coarse)').matches) return 'coarse';
+      if (window.matchMedia('(pointer: fine)').matches)   return 'fine';
+      if (window.matchMedia('(pointer: none)').matches)   return 'none';
     } catch (_) {}
     return undefined;
   });
@@ -1868,8 +2325,8 @@ function collectPointerCoarse() {
 function collectAnyPointerCoarse() {
   return collectSignal('anyPointerCoarse', () => {
     try {
-      if (window.matchMedia('(any-pointer: coarse)').matches) return true;
-      if (window.matchMedia('(any-pointer: fine)').matches)   return false;
+      if (window.matchMedia('(any-pointer: coarse)').matches) return 'coarse';
+      if (window.matchMedia('(any-pointer: fine)').matches)   return 'fine';
     } catch (_) {}
     return undefined;
   });
@@ -1880,15 +2337,15 @@ async function collectStorageEstimate() {
   return collectSignal('storageEstimate', async () => {
     try {
       const sm = navigator.storage;
-      if (sm && typeof sm.estimate === 'function') {
-        const est = await sm.estimate();
-        const persisted = typeof sm.persisted === 'function' ? await sm.persisted() : undefined;
-        return {
-          quota:     est.quota,
-          usage:     est.usage,
-          persisted: persisted
-        };
-      }
+      if (!sm || typeof sm.estimate !== 'function') return null;
+      const est = await sm.estimate();
+      let persisted;
+      try { persisted = await sm.persisted(); } catch (_) {}
+      return {
+        quota:      est.quota,
+        usage:      est.usage,
+        persisted,
+      };
     } catch (_) { return null; }
   });
 }
@@ -1902,8 +2359,8 @@ async function collectPermissions() {
     const result = {};
     await Promise.all(names.map(async name => {
       try {
-        const status = await pm.query({ name });
-        result[name] = status.state;
+        const s = await pm.query({ name });
+        result[name] = s.state;
       } catch (_) {
         result[name] = 'error';
       }
@@ -1921,20 +2378,33 @@ async function collectRtcPeerConnection() {
     if (!RTC) return null;
 
     return new Promise(resolve => {
-      const pc = new RTC({ iceServers: [] });
-      const ips = new Set();
-      pc.createDataChannel('');
-      pc.onicecandidate = e => {
-        if (!e || !e.candidate || !e.candidate.candidate) {
-          pc.close();
-          resolve(Array.from(ips));
-          return;
-        }
-        const parts = e.candidate.candidate.split(' ');
-        if (parts.length > 4) ips.add(parts[4]);
+      const localIPs = new Set();
+      let pc;
+      const done = (val) => {
+        try { if (pc) pc.close(); } catch (_) {}
+        resolve(val);
       };
-      pc.createOffer().then(offer => pc.setLocalDescription(offer));
-      setTimeout(() => { pc.close(); resolve(Array.from(ips)); }, 2000);
+      const timeout = setTimeout(() => done(localIPs.size ? [...localIPs].sort() : null), 1000);
+
+      try {
+        pc = new RTC({ iceServers: [] });
+        pc.createDataChannel('');
+        pc.onicecandidate = e => {
+          if (!e || !e.candidate) {
+            clearTimeout(timeout);
+            done(localIPs.size ? [...localIPs].sort() : null);
+            return;
+          }
+          const ipMatch = /(?:^|\s)((?:\d{1,3}\.){3}\d{1,3})/.exec(e.candidate.candidate);
+          if (ipMatch) localIPs.add(ipMatch[1]);
+        };
+        pc.createOffer()
+          .then(offer => pc.setLocalDescription(offer))
+          .catch(() => { clearTimeout(timeout); done(null); });
+      } catch (_) {
+        clearTimeout(timeout);
+        done(null);
+      }
     });
   });
 }
@@ -1942,64 +2412,68 @@ async function collectRtcPeerConnection() {
 // ---------- SIGNAL 88 — MediaDevices enumerate — count of audioinput / audiooutput / videoinput devices ----------
 async function collectMediaDevices() {
   return collectSignal('mediaDevices', async () => {
-    if (!navigator.mediaDevices || typeof navigator.mediaDevices.enumerateDevices !== 'function')
-      return null;
     try {
-      const devices = await navigator.mediaDevices.enumerateDevices();
+      const md = navigator.mediaDevices;
+      if (!md || typeof md.enumerateDevices !== 'function') return null;
+      const devices = await md.enumerateDevices();
       const counts = { audioinput: 0, audiooutput: 0, videoinput: 0 };
-      for (const d of devices) counts[d.kind] = (counts[d.kind] || 0) + 1;
+      for (const d of devices) {
+        if (d.kind in counts) counts[d.kind]++;
+      }
       return counts;
-    } catch (_) {
-      return null;
-    }
+    } catch (_) { return null; }
   });
 }
 
 // ---------- SIGNAL 89 — Browser scale factor / effective DPR via canvas pixel measurement ----------
 function collectBrowserScaleFactor() {
   return collectSignal('browserScaleFactor', () => {
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return null;
-    canvas.width = 1; canvas.height = 1;
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, 1, 1);
-    const imgData = ctx.getImageData(0, 0, 1, 1);
-    return imgData.width / canvas.width;
+    try {
+      const nativeDpr = window.devicePixelRatio || 1;
+      // Create a 1×1 canvas; if the browser applies extra scaling, the
+      // back-buffer dimensions will differ from the CSS pixel dimensions.
+      const canvas = document.createElement('canvas');
+      canvas.style.width  = '1px';
+      canvas.style.height = '1px';
+      // On HiDPI screens the canvas backing store is dpr × the CSS size
+      return Math.round(nativeDpr * 100) / 100;
+    } catch (_) { return null; }
   });
 }
 
 // ---------- SIGNAL 90 — API availability flags — Bluetooth, USB, Serial, XR, MIDI, Gamepad, PaymentRequest … ----------
 function collectApiAvailability() {
   return collectSignal('apiAvailability', () => {
+    const n = window, nav = navigator;
     return {
-      bluetooth:       'bluetooth'       in navigator,
-      usb:             'usb'             in navigator,
-      serial:          'serial'          in navigator,
-      xr:              'xr'              in navigator,
-      midi:            'requestMIDIAccess' in navigator,
-      gamepad:         'getGamepads'     in navigator,
-      paymentRequest:  'PaymentRequest'  in window,
-      credentials:     'credentials'     in navigator,
-      presentation:    'presentation'    in navigator,
-      wakeLock:        'wakeLock'        in navigator,
-      clipboard:       'clipboard'       in navigator,
-      contacts:        'contacts'        in navigator,
-      share:           'share'           in navigator,
-      deviceMemory:    'deviceMemory'    in navigator,
-      getBattery:      'getBattery'      in navigator,
+      bluetooth:        'bluetooth' in nav,
+      usb:              'usb' in nav,
+      serial:           'serial' in nav,
+      hid:              'hid' in nav,
+      xr:               'xr' in nav,
+      midi:             'requestMIDIAccess' in nav,
+      gamepad:          'getGamepads' in nav,
+      paymentRequest:   'PaymentRequest' in n,
+      contactsAPI:      'contacts' in nav,
+      webShare:         'share' in nav,
+      fileSystemAccess: 'showOpenFilePicker' in n,
+      speechRecognition:'SpeechRecognition' in n || 'webkitSpeechRecognition' in n,
+      eyeDropper:       'EyeDropper' in n,
+      screenWakeLock:   'wakeLock' in nav,
+      virtualKeyboard:  'virtualKeyboard' in nav,
     };
   });
 }
 
 // ===========================================================================
-// MAIN COLLECTOR — Runs all signals, then generates client-side visitorId
+// MAIN COLLECTOR — Runs all 98 signals, then generates client-side visitorId
 // ===========================================================================
 async function collectAllSignals() {
-  if (_enableLogs) console.log('%c[v1] Collecting signals…', 'color:#888;');
+  if (_enableLogs) console.group('[FingerprintSignals] Starting signal collection…');
   const start = performance.now();
 
   const results = await Promise.all([
+    // Navigator / Browser Identity ──────────────────────
     collectUserAgent(),
     collectClientHints(),
     collectPlatform(),
@@ -2009,20 +2483,28 @@ async function collectAllSignals() {
     collectVendorInfo(),
     collectNavigatorFunctionNames(),
     collectNavigatorDescriptors(),
+
+    // Screen / Display ──────────────────────────────────
     collectScreenInfo(),
     collectScreenFrame(),
     collectWindowDimensions(),
     collectHighDpi(),
+
+    // Time & Locale ─────────────────────────────────────
     collectTimezone(),
     collectPerformanceTimeOrigin(),
     collectTimerPrecision(),
     collectIntlLocale(),
+
+    // Storage & Connectivity ────────────────────────────
     collectStorageAvailability(),
     collectCookieSupport(),
     collectHardwareInfo(),
     collectTouchSupport(),
     collectConnectionInfo(),
     collectOnlineStatus(),
+
+    // CSS Media Features ──────────────────────────────────────
     collectMediaFeatures(),
     collectPrefersColorScheme(),
     collectColorGamut(),
@@ -2032,26 +2514,40 @@ async function collectAllSignals() {
     collectInvertedColors(),
     collectForcedColors(),
     collectMonochrome(),
+
+    // CSS / Rendering ─────────────────────────────────────────
     collectSystemColors(),
     collectCssFeatures(),
+
+    // Plugins / MIME ──────────────────────────────────────────
     collectPlugins(),
     collectMimeTypesCount(),
     collectMimeTypePrototype(),
     collectPluginPrototype(),
     collectPdfViewerEnabled(),
     collectPrivateClickMeasurement(),
+
+    // Canvas / WebGL ──────────────────────────────────────────
     collectCanvas2D(),
     collectCanvasPrng(),
     collectWebGL(),
     collectWebGLExtensions(),
     collectWebGLCanvas(),
+
+    // Audio ───────────────────────────────────────────────────
     collectAudioFingerprint(),
     collectAudioLatency(),
+
+    // Fonts ───────────────────────────────────────────────────
     collectFonts(),
     collectFontPreferences(),
     collectSpeechVoices(),
+
+    // Math / FPU ──────────────────────────────────────────────
     collectMathFingerprint(),
     collectFloat32NanByte(),
+
+    // JS Engine ───────────────────────────────────────────────
     collectEvalLength(),
     collectErrorTrace(),
     collectErrorStackFormat(),
@@ -2059,6 +2555,8 @@ async function collectAllSignals() {
     collectFirefoxToSource(),
     collectPrngEntropy(),
     collectWindowCloseFn(),
+
+    // WebAssembly / APIs ──────────────────────────────────────
     collectWasmFeatures(),
     collectSourceBufferTypes(),
     collectSharedArrayBuffer(),
@@ -2068,16 +2566,22 @@ async function collectAllSignals() {
     collectWindowOrigin(),
     collectDocumentRootAttributes(),
     collectCreateElementDescriptor(),
+
+    // Permissions / DRM / Rendering ───────────────────────────
     collectNotificationPermission(),
     collectDrmCapabilities(),
     collectMathMLRendering(),
     collectIosRadioFont(),
+
+    // Bot / Automation Detection ──────────────────────────────
     collectWebDriver(),
     collectInputEventTrusted(),
     collectAutomationGlobals(),
     collectAutomationWindowScan(),
     collectObjectToInspect(),
     collectWindowExternal(),
+
+    // Uncategorized ──────────────────────────────────────────────────────
     collectIncognito(),
     collectReducedTransparency(),
     collectHoverNone(),
@@ -2093,17 +2597,28 @@ async function collectAllSignals() {
   ]);
 
   const signals = {};
-  for (const r of results) signals[r.label] = r.value;
+  for (const item of results) {
+    if (item && item.label) signals[item.label] = item.value;
+  }
 
-  const elapsed = performance.now() - start;
-  if (_enableLogs) console.log(`%c[v1] Signals collected in ${elapsed.toFixed(0)}ms`, 'color:#888;');
+  const duration = Math.round(performance.now() - start);
+  if (_enableLogs) {
+    console.log(`[FingerprintSignals] ✓ Collected ${results.length} signals in ${duration}ms`);
+    console.log('[FingerprintSignals] Full signal map:', signals);
+    console.groupEnd();
+  }
 
-  return signals;
+  // Fuzzy-match against stored profile or mint new ID
+  const { visitorId, isNew, visits } = await matchOrCreateVisitor(signals);
+  const deterministicVisitorId = await mintVisitorId(signals);
+  console.log(deterministicVisitorId,"----------");
+  
+  if (_enableLogs) console.log(_similarityScore);
+  
+  const result = { signals, visitorId, isNew, visits, deterministicVisitorId };
+  if (_similarityScore) result.similarityScore = _similarityScore;
+  return result;
 }
-
-// ===========================================================================
-// PUBLIC API
-// ===========================================================================
 
 /**
  * Initialize the agent.
@@ -2115,26 +2630,20 @@ async function load() {
 }
 
 /**
- * Collect all signals and return the generated visitor ID.
- * 
- * Returns only the deterministic visitor ID - no state tracking.
- * Without localStorage, we cannot determine:
- *  - Whether this is a new or returning visitor
- *  - How many times this visitor has been seen
- * 
- * The same device/browser will always generate the same visitorId
- * (unless hardware or browser configuration changes).
- * 
- * @returns {{ version, visitorId, signals }}
+ * Collect all signals, run fuzzy matching, and return the full result.
+ * Equivalent to FingerprintJS OSS agent.get().
+ * @returns {{ visitorId, isNew, visits, signals, similarityScore }}
  */
 async function get() {
-  const signals = await collectAllSignals();
-  const result  = await generateVisitorId(signals);
-
+  const result = await collectAllSignals();
   return {
-    version:   "1.0.1",
-    visitorId: result.visitorId,
-    signals:   signals,
+    version:      "1.0.1",
+    visitorId:    result.visitorId,
+    deterministicVisitorId: result.deterministicVisitorId,
+    isNew:        result.isNew,
+    visits:       result.visits,
+    signals:      result.signals,
+    ...(result.similarityScore ? { similarityScore: result.similarityScore } : null)
   };
 }
 
