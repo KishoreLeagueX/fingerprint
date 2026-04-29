@@ -1,4 +1,4 @@
-## Visitor ID System
+## Fingerprinting System
 
 > **Signals should be same across sessions, should be unique across users.**
 
@@ -451,7 +451,7 @@ Only **28 out of ~50 collected signals** are non-randomized. The remaining 22+ s
 Multiple distinct users share identical signal combinations. The deterministic hash collapses different users into the same visitor ID.
 
 ❌ **Violation of core principle:**  
-> "Signals should be unique across sessions, but should NOT be unique across users."
+> "Signals should be same across sessions, should be unique across users."
 
 V1 inverts this: signals are NOT unique across users (collision), but ARE overly unique across sessions (hash sensitivity to any single signal change).
 
