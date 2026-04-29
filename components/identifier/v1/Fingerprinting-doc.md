@@ -1,6 +1,6 @@
 ## Visitor ID System
 
-> **Signals should be unique across sessions, but should NOT be unique across users.**
+> **Signals should be same across sessions, should be unique across users.**
 
 This is the central principle that governs every design decision in this system.
 
