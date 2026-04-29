@@ -406,3 +406,123 @@ The `stableSerialize` function absorbs:
 **Only `SIGNAL_WEIGHTS` keys are stored** — raw signal values like `userAgent`, `clientHints`, `navigatorExtras` are collected for analysis but not persisted. This keeps the stored profile under ~50KB for typical font lists.
 
 **Profile updates on match:** On each successful match (score ≥ 0.75), the stored signals are refreshed with the current readings and `lastSeen` + `visits` are updated. This allows the stored profile to drift naturally with the device (new fonts, GPU driver update) without triggering false new-visitor events.
+
+---
+
+## 11. System Evolution: V0 → V1 → V2
+
+### V0: The Baseline (Current Production System)
+
+**Architecture:** Client-side fuzzy matching with weighted signals + localStorage persistence
+
+**What works:**
+- Weighted similarity scoring (0.75 threshold) successfully handles noise and signal drift
+- localStorage-based profile matching provides stable visitor IDs across sessions
+- Survives privacy extensions (Canvas Defender), browser updates, and configuration changes
+- ~89% match accuracy even with multiple signals poisoned
+
+**What it achieves:**
+- Same user across sessions = same visitor ID ✓
+- Same user in incognito mode = same visitor ID ✓
+- Same user with anti-fingerprint extensions = same visitor ID ✓
+
+This is the system described in sections 1–10 above.
+
+---
+
+### V1: Simplification Attempt (Testing Phase)
+
+**Goal:** Remove weightage system and localStorage dependency; rely purely on deterministic hashing
+
+**Architecture:** Hash-based fingerprinting using only hardened signals
+
+**Implementation:**
+- Introduced `deterministicVisitorId` — always recomputed from `SHA-256(stableSerialize(HARDENED_KEYS))`
+- No localStorage persistence
+- No fuzzy matching
+- No weighted scoring
+
+**Results from dataset analysis:**
+
+❌ **Signal randomization problem:**  
+Only **28 out of ~50 collected signals** are non-randomized. The remaining 22+ signals (especially canvas, screen layout, CSS media features) are frequently poisoned by privacy tools or change due to environmental factors.
+
+❌ **Signal collision problem:**  
+Multiple distinct users share identical signal combinations. The deterministic hash collapses different users into the same visitor ID.
+
+❌ **Violation of core principle:**  
+> "Signals should be unique across sessions, but should NOT be unique across users."
+
+V1 inverts this: signals are NOT unique across users (collision), but ARE overly unique across sessions (hash sensitivity to any single signal change).
+
+**Conclusion:** Pure hash-based fingerprinting without fuzzy matching is insufficient for production use. A single signal change (browser update, extension install) breaks the identifier, while signal collisions merge distinct users.
+
+---
+
+### V2: Server-Side Fuzzy Matching (Proposed)
+
+**Goal:** Retain V0's fuzzy matching logic while eliminating client-side localStorage dependency and enabling cross-publisher tracking
+
+**Architecture:** Client-side signal collection → server-side storage and matching
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Client (Browser)                                             │
+│  ┌────────────────────────────────┐                          │
+│  │  collectAllSignals()           │  ← collect ~50 signals   │
+│  │  • audioFingerprint             │                          │
+│  │  • mathFingerprint              │                          │
+│  │  • fonts, webGL, canvas, ...    │                          │
+│  └────────────┬───────────────────┘                          │
+│               │ POST /identify                                │
+│               │ { signals: {...}, publisherId: "xyz" }        │
+└───────────────┼───────────────────────────────────────────────┘
+                │
+                ▼
+┌──────────────────────────────────────────────────────────────┐
+│  Server (Backend)                                             │
+│  ┌────────────────────────────────┐                          │
+│  │  1. Query database for          │                          │
+│  │     matching profiles           │                          │
+│  │                                 │                          │
+│  │  2. computeSimilarityScore()    │  ← V0 fuzzy matching     │
+│  │     for each candidate          │     logic, server-side   │
+│  │                                 │                          │
+│  │  3. score >= 0.75?              │                          │
+│  │     YES → return existing ID    │                          │
+│  │     NO  → mint new ID           │                          │
+│  │                                 │                          │
+│  │  4. Store/update profile        │                          │
+│  │     in database                 │                          │
+│  └────────────┬───────────────────┘                          │
+│               │ { visitorId: "...", confidence: 0.89 }        │
+└───────────────┼───────────────────────────────────────────────┘
+                │
+                ▼
+┌──────────────────────────────────────────────────────────────┐
+│  Database (Persistent Storage)                                │
+│  ┌────────────────────────────────┐                          │
+│  │  visitor_profiles               │                          │
+│  │  ├─ visitorId                   │                          │
+│  │  ├─ signals { ... }             │                          │
+│  │  ├─ firstSeen, lastSeen         │                          │
+│  │  ├─ visits                       │                          │
+│  │  └─ publisherIds [...]          │  ← cross-publisher       │
+│  └────────────────────────────────┘                          │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**Implementation checklist:**
+
+- [ ] Port V0 fuzzy matching logic to backend (Node.js, Python, Go, etc.)
+- [ ] Design database schema for visitor profiles (Postgres, MongoDB, etc.)
+- [ ] Build REST API: `POST /identify` accepts signals, returns `{ visitorId, confidence }`
+- [ ] Implement query optimization: index on hardened signals for fast candidate lookup
+- [ ] Add rate limiting and API authentication (prevent abuse)
+- [ ] Build monitoring dashboard: match rates, confidence distribution, signal drift
+- [ ] Client SDK: collect signals + call `/identify` API
+- [ ] A/B test V2 vs V0 on small traffic percentage
+
+**Expected outcome:**
+
+V2 should achieve V0's accuracy (~89% match rate with noisy signals) while eliminating localStorage dependency and enabling cross-publisher tracking. The deterministic hash approach from V1 remains available as `deterministicVisitorId` for debugging, but the primary `visitorId` is server-assigned via fuzzy matching.
