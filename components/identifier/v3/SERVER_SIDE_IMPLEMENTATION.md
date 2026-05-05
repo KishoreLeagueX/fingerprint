@@ -4,7 +4,12 @@
 
 ## 1. Overview
 
-**Purpose:** Identify unique website visitors across sessions.
+**Purpose:** Identify the same unique visitor across multiple client websites and browser sessions using a centralized fingerprint API.
+
+**How It Works:**
+- Client website A calls your API → receives visitor_id: `abc123...`
+- Same user visits client website B → calls same API → receives **same** visitor_id: `abc123...`
+- Works across browser restarts, different domains, and even after clearing local storage
 
 **Target Metrics:**
 - **Accuracy:** 95%+ identification rate across all browsers
