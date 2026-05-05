@@ -1,4 +1,4 @@
-# Server-Side Backend Implementation Plan
+# Server-Side Implementation Plan
 ## Fingerprint Visitor Identification System
 
 
