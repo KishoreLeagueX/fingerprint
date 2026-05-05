@@ -1,7 +1,6 @@
 # Server-Side Backend Implementation Plan
 ## Fingerprint Visitor Identification System
 
----
 
 ## 1. Overview
 
@@ -12,7 +11,6 @@
 - **Performance:** <50ms server response time
 - **Coverage:** 100% browser compatibility (with fallback mechanisms)
 
----
 
 ## 2. System Architecture
 
@@ -60,7 +58,6 @@ Request Received (POST /api/identify)
     │         │         └─ Return { visitor_id, method: 'new', confidence: 1.0 }
 ```
 
----
 
 ## 3. Method 1: Third-Party Cookie Identification
 
@@ -121,7 +118,6 @@ HttpOnly               ← Prevents JavaScript access (security)
 - ❌ Incognito/Private mode bypasses cookies
 - ❌ Privacy regulations (GDPR/CCPA) may require consent
 
----
 
 ## 4. Method 2: Fuzzy Fingerprint Matching
 
@@ -257,7 +253,7 @@ function fuzzyMatchOrCreate(currentSignals):
 - ❌ Requires storing large signal payloads
 - ❌ Anti-fingerprinting tools can reduce accuracy
 
----
+
 ## 5. Signal Weights Reference
 
 ### 5.1 Complete Signal Weights Table
@@ -370,7 +366,6 @@ Different signal types require different comparison algorithms:
 | **Object** | Recursive property comparison | `webGL: compare each property separately` |
 | **Boolean** | Exact match | `incognito: a === b` |
 
----
 
 ## 6. Visitor ID Generation
 
@@ -510,7 +505,6 @@ Visitor ID: "a1b2c3d4e5f678901234567890abcdef" (first 32 chars)
 4. **Hardened signals can evolve** - When adding/removing signals, increment schema version
 5. **IDs are updatable** - When schema changes, new visits generate new IDs (old IDs still valid for backward compatibility)
 
----
 
 ## 7. API Endpoint Specification
 
@@ -583,7 +577,6 @@ X-Match-Method: fuzzy
 X-Candidates-Checked: 47
 ```
 
----
 
 ## 8. Security & Performance Recommendations
 
@@ -641,40 +634,38 @@ X-Candidates-Checked: 47
 DELETE /api/visitor/:visitor_id
 ```
 
----
-
 ## 9. Implementation Checklist
 
 ### Phase 1: Core Functionality
-- [ ] Set up /api/identify endpoint
-- [ ] Implement cookie-based identification (Method 1)
-- [ ] Implement visitor_id generation
-- [ ] Set up database schema for visitor profiles
-- [ ] Implement basic signal storage
+- Set up /api/identify endpoint
+- Implement cookie-based identification (Method 1)
+- Implement visitor_id generation
+- Set up database schema for visitor profiles
+- Implement basic signal storage
 
 ### Phase 2: Fuzzy Matching
-- [ ] Implement signal similarity computation
-- [ ] Implement weighted scoring algorithm
-- [ ] Create fuzzy matching logic (linear scan for MVP)
-- [ ] Test with sample fingerprint data
+- Implement signal similarity computation
+- Implement weighted scoring algorithm
+- Create fuzzy matching logic (linear scan for MVP)
+- Test with sample fingerprint data
 
 ### Phase 3: Optimization
-- [ ] Add hardened hash indexing
-- [ ] Implement indexed matching strategy
-- [ ] Set up Redis caching layer
-- [ ] Optimize database queries
+- Add hardened hash indexing
+- Implement indexed matching strategy
+- Set up Redis caching layer
+- Optimize database queries
 
 ### Phase 4: Security & Monitoring
-- [ ] Implement rate limiting (IP + hash-based)
-- [ ] Add bot/fraud detection checks
-- [ ] Set up performance monitoring
-- [ ] Configure alerting thresholds
+- Implement rate limiting (IP + hash-based)
+- Add bot/fraud detection checks
+- Set up performance monitoring
+- Configure alerting thresholds
 
 ### Phase 5: Compliance & Maintenance
-- [ ] Add visitor deletion endpoint
-- [ ] Implement auto-archival for inactive visitors
-- [ ] Document privacy policy implications
-- [ ] Set up backup and disaster recovery
+- Add visitor deletion endpoint
+- Implement auto-archival for inactive visitors
+- Document privacy policy implications
+- Set up backup and disaster recovery
 
 ---
 
